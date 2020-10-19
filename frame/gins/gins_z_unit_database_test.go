@@ -4,9 +4,12 @@
 // If a copy of the MIT was not distributed with this file,
 // You can obtain one at https://github.com/gogf/gf.
 
-package gins
+package gins_test
 
 import (
+	"github.com/gogf/gf/debug/gdebug"
+	"github.com/gogf/gf/frame/gins"
+	"github.com/gogf/gf/os/gtime"
 	"testing"
 	"time"
 
@@ -15,57 +18,38 @@ import (
 )
 
 func Test_Database(t *testing.T) {
-	config := `
-# 模板引擎目录
-viewpath = "/home/www/templates/"
-test = "v=2"
-# MySQL数据库配置
-[database]
-    [[database.default]]
-        host     = "127.0.0.1"
-        port     = "3306"
-        user     = "root"
-        pass     = "12345678"
-        name     = "test"
-        type     = "mysql"
-        role     = "master"
-		weight   = "1"
-        charset  = "utf8"
-    [[database.test]]
-        host     = "127.0.0.1"
-        port     = "3306"
-        user     = "root"
-        pass     = "12345678"
-        name     = "test"
-        type     = "mysql"
-        role     = "master"
-		weight   = "1"
-        charset  = "utf8"
-# Redis数据库配置
-[redis]
-    default = "127.0.0.1:6379,0"
-    cache   = "127.0.0.1:6379,1"
-`
-	path := "config.toml"
-	err := gfile.PutContents(path, config)
-	gtest.Assert(err, nil)
-	defer gfile.Remove(path)
-	defer Config().Clear()
+	databaseContent := gfile.GetContents(
+		gdebug.TestDataPath("database", "config.toml"),
+	)
+	gtest.C(t, func(t *gtest.T) {
+		var err error
+		dirPath := gfile.TempDir(gtime.TimestampNanoStr())
+		err = gfile.Mkdir(dirPath)
+		t.Assert(err, nil)
+		defer gfile.Remove(dirPath)
 
-	// for gfsnotify callbacks to refresh cache of config file
-	time.Sleep(500 * time.Millisecond)
+		name := "config.toml"
+		err = gfile.PutContents(gfile.Join(dirPath, name), databaseContent)
+		t.Assert(err, nil)
 
-	gtest.Case(t, func() {
+		err = gins.Config().AddPath(dirPath)
+		t.Assert(err, nil)
+
+		defer gins.Config().Clear()
+
+		// for gfsnotify callbacks to refresh cache of config file
+		time.Sleep(500 * time.Millisecond)
+
 		//fmt.Println("gins Test_Database", Config().Get("test"))
 
-		dbDefault := Database()
-		dbTest := Database("test")
-		gtest.AssertNE(dbDefault, nil)
-		gtest.AssertNE(dbTest, nil)
+		dbDefault := gins.Database()
+		dbTest := gins.Database("test")
+		t.AssertNE(dbDefault, nil)
+		t.AssertNE(dbTest, nil)
 
-		gtest.Assert(dbDefault.PingMaster(), nil)
-		gtest.Assert(dbDefault.PingSlave(), nil)
-		gtest.Assert(dbTest.PingMaster(), nil)
-		gtest.Assert(dbTest.PingSlave(), nil)
+		t.Assert(dbDefault.PingMaster(), nil)
+		t.Assert(dbDefault.PingSlave(), nil)
+		t.Assert(dbTest.PingMaster(), nil)
+		t.Assert(dbTest.PingSlave(), nil)
 	})
 }

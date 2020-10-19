@@ -11,58 +11,48 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/gogf/gf/internal/cmdenv"
 	"time"
+
+	"github.com/gogf/gf/container/gvar"
+	"github.com/gogf/gf/internal/intlog"
 
 	"github.com/gogf/gf/os/glog"
 
 	"github.com/gogf/gf/container/gmap"
 	"github.com/gogf/gf/container/gtype"
-	"github.com/gogf/gf/container/gvar"
 	"github.com/gogf/gf/os/gcache"
 	"github.com/gogf/gf/util/grand"
 )
 
 // DB defines the interfaces for ORM operations.
 type DB interface {
+	// ===========================================================================
+	// Model creation.
+	// ===========================================================================
+
+	// The DB interface is designed not only for
+	// relational databases but also for NoSQL databases in the future. The name
+	// "Table" is not proper for that purpose any more.
+	Table(table ...string) *Model
+	Model(table ...string) *Model
+	Schema(schema string) *Schema
+
 	// Open creates a raw connection object for database with given node configuration.
 	// Note that it is not recommended using the this function manually.
 	Open(config *ConfigNode) (*sql.DB, error)
 
+	// ===========================================================================
 	// Query APIs.
-	Query(query string, args ...interface{}) (*sql.Rows, error)
+	// ===========================================================================
+
+	Query(sql string, args ...interface{}) (*sql.Rows, error)
 	Exec(sql string, args ...interface{}) (sql.Result, error)
 	Prepare(sql string, execOnMaster ...bool) (*sql.Stmt, error)
 
-	// Internal APIs for CURD, which can be overwrote for custom CURD implements.
-	DoQuery(link Link, query string, args ...interface{}) (rows *sql.Rows, err error)
-	DoGetAll(link Link, query string, args ...interface{}) (result Result, err error)
-	DoExec(link Link, query string, args ...interface{}) (result sql.Result, err error)
-	DoPrepare(link Link, query string) (*sql.Stmt, error)
-	DoInsert(link Link, table string, data interface{}, option int, batch ...int) (result sql.Result, err error)
-	DoBatchInsert(link Link, table string, list interface{}, option int, batch ...int) (result sql.Result, err error)
-	DoUpdate(link Link, table string, data interface{}, condition string, args ...interface{}) (result sql.Result, err error)
-	DoDelete(link Link, table string, condition string, args ...interface{}) (result sql.Result, err error)
-
-	// Query APIs for convenience purpose.
-	GetAll(query string, args ...interface{}) (Result, error)
-	GetOne(query string, args ...interface{}) (Record, error)
-	GetValue(query string, args ...interface{}) (Value, error)
-	GetArray(query string, args ...interface{}) ([]Value, error)
-	GetCount(query string, args ...interface{}) (int, error)
-	GetStruct(objPointer interface{}, query string, args ...interface{}) error
-	GetStructs(objPointerSlice interface{}, query string, args ...interface{}) error
-	GetScan(objPointer interface{}, query string, args ...interface{}) error
-
-	// Master/Slave specification support.
-	Master() (*sql.DB, error)
-	Slave() (*sql.DB, error)
-
-	// Ping-Pong.
-	PingMaster() error
-	PingSlave() error
-
-	// Transaction.
-	Begin() (*TX, error)
+	// ===========================================================================
+	// Common APIs for CURD.
+	// ===========================================================================
 
 	Insert(table string, data interface{}, batch ...int) (sql.Result, error)
 	InsertIgnore(table string, data interface{}, batch ...int) (sql.Result, error)
@@ -76,25 +66,76 @@ type DB interface {
 	Update(table string, data interface{}, condition interface{}, args ...interface{}) (sql.Result, error)
 	Delete(table string, condition interface{}, args ...interface{}) (sql.Result, error)
 
-	// Model creation.
-	From(tables string) *Model
-	Table(tables string) *Model
-	Schema(schema string) *Schema
+	// ===========================================================================
+	// Internal APIs for CURD, which can be overwrote for custom CURD implements.
+	// ===========================================================================
 
+	DoQuery(link Link, sql string, args ...interface{}) (rows *sql.Rows, err error)
+	DoGetAll(link Link, sql string, args ...interface{}) (result Result, err error)
+	DoExec(link Link, sql string, args ...interface{}) (result sql.Result, err error)
+	DoPrepare(link Link, sql string) (*sql.Stmt, error)
+	DoInsert(link Link, table string, data interface{}, option int, batch ...int) (result sql.Result, err error)
+	DoBatchInsert(link Link, table string, list interface{}, option int, batch ...int) (result sql.Result, err error)
+	DoUpdate(link Link, table string, data interface{}, condition string, args ...interface{}) (result sql.Result, err error)
+	DoDelete(link Link, table string, condition string, args ...interface{}) (result sql.Result, err error)
+
+	// ===========================================================================
+	// Query APIs for convenience purpose.
+	// ===========================================================================
+
+	GetAll(sql string, args ...interface{}) (Result, error)
+	GetOne(sql string, args ...interface{}) (Record, error)
+	GetValue(sql string, args ...interface{}) (Value, error)
+	GetArray(sql string, args ...interface{}) ([]Value, error)
+	GetCount(sql string, args ...interface{}) (int, error)
+	GetStruct(objPointer interface{}, sql string, args ...interface{}) error
+	GetStructs(objPointerSlice interface{}, sql string, args ...interface{}) error
+	GetScan(objPointer interface{}, sql string, args ...interface{}) error
+
+	// ===========================================================================
+	// Master/Slave specification support.
+	// ===========================================================================
+
+	Master() (*sql.DB, error)
+	Slave() (*sql.DB, error)
+
+	// ===========================================================================
+	// Ping-Pong.
+	// ===========================================================================
+
+	PingMaster() error
+	PingSlave() error
+
+	// ===========================================================================
+	// Transaction.
+	// ===========================================================================
+
+	Begin() (*TX, error)
+	Transaction(f func(tx *TX) error) (err error)
+
+	// ===========================================================================
 	// Configuration methods.
+	// ===========================================================================
+
 	GetCache() *gcache.Cache
 	SetDebug(debug bool)
 	GetDebug() bool
 	SetSchema(schema string)
 	GetSchema() string
 	GetPrefix() string
+	GetGroup() string
+	SetDryRun(dryrun bool)
+	GetDryRun() bool
 	SetLogger(logger *glog.Logger)
 	GetLogger() *glog.Logger
 	SetMaxIdleConnCount(n int)
 	SetMaxOpenConnCount(n int)
 	SetMaxConnLifetime(d time.Duration)
 
+	// ===========================================================================
 	// Utility methods.
+	// ===========================================================================
+
 	GetChars() (charLeft string, charRight string)
 	GetMaster(schema ...string) (*sql.DB, error)
 	GetSlave(schema ...string) (*sql.DB, error)
@@ -103,16 +144,20 @@ type DB interface {
 	QuotePrefixTableName(table string) string
 	Tables(schema ...string) (tables []string, err error)
 	TableFields(table string, schema ...string) (map[string]*TableField, error)
+	HasTable(name string) (bool, error)
 
 	// HandleSqlBeforeCommit is a hook function, which deals with the sql string before
 	// it's committed to underlying driver. The parameter <link> specifies the current
-	// database connection operation object. You can modify the sql string <query> and its
+	// database connection operation object. You can modify the sql string <sql> and its
 	// arguments <args> as you wish before they're committed to driver.
-	HandleSqlBeforeCommit(link Link, query string, args []interface{}) (string, []interface{})
+	HandleSqlBeforeCommit(link Link, sql string, args []interface{}) (string, []interface{})
 
+	// ===========================================================================
 	// Internal methods.
-	filterFields(schema, table string, data map[string]interface{}) map[string]interface{}
-	convertValue(fieldValue []byte, fieldType string) interface{}
+	// ===========================================================================
+
+	mappingAndFilterData(schema, table string, data map[string]interface{}, filter bool) (map[string]interface{}, error)
+	convertValue(fieldValue interface{}, fieldType string) interface{}
 	rowsToResult(rows *sql.Rows) (Result, error)
 }
 
@@ -121,8 +166,9 @@ type Core struct {
 	DB               DB            // DB interface object.
 	group            string        // Configuration group name.
 	debug            *gtype.Bool   // Enable debug mode for the database.
-	cache            *gcache.Cache // Cache manager.
+	cache            *gcache.Cache // Cache manager, SQL result cache only.
 	schema           *gtype.String // Custom schema for this object.
+	dryrun           *gtype.Bool   // Dry run.
 	prefix           string        // Table prefix.
 	logger           *glog.Logger  // Logger.
 	maxIdleConnCount int           // Max idle connection count.
@@ -144,6 +190,7 @@ type Sql struct {
 	Error  error         // Execution result.
 	Start  int64         // Start execution timestamp in milliseconds.
 	End    int64         // End execution timestamp in milliseconds.
+	Group  string        // Group is the group name of the configuration that the sql is executed from.
 }
 
 // TableField is the struct for table field.
@@ -160,39 +207,46 @@ type TableField struct {
 
 // Link is a common database function wrapper interface.
 type Link interface {
-	Query(query string, args ...interface{}) (*sql.Rows, error)
+	Query(sql string, args ...interface{}) (*sql.Rows, error)
 	Exec(sql string, args ...interface{}) (sql.Result, error)
 	Prepare(sql string) (*sql.Stmt, error)
 }
 
-// Value is the field value type.
-type Value = *gvar.Var
+type (
+	// Value is the field value type.
+	Value = *gvar.Var
 
-// Record is the row record of the table.
-type Record map[string]Value
+	// Record is the row record of the table.
+	Record map[string]Value
 
-// Result is the row record array.
-type Result []Record
+	// Result is the row record array.
+	Result []Record
 
-// Map is alias of map[string]interface{},
-// which is the most common usage map type.
-type Map = map[string]interface{}
+	// Map is alias of map[string]interface{},
+	// which is the most common usage map type.
+	Map = map[string]interface{}
 
-// List is type of map array.
-type List = []Map
+	// List is type of map array.
+	List = []Map
+)
 
 const (
-	gINSERT_OPTION_DEFAULT      = 0
-	gINSERT_OPTION_REPLACE      = 1
-	gINSERT_OPTION_SAVE         = 2
-	gINSERT_OPTION_IGNORE       = 3
-	gDEFAULT_BATCH_NUM          = 10 // Per count for batch insert/replace/save
-	gDEFAULT_CONN_MAX_LIFE_TIME = 30 // Max life time for per connection in pool in seconds.
+	gINSERT_OPTION_DEFAULT       = 0
+	gINSERT_OPTION_REPLACE       = 1
+	gINSERT_OPTION_SAVE          = 2
+	gINSERT_OPTION_IGNORE        = 3
+	gDEFAULT_BATCH_NUM           = 10 // Per count for batch insert/replace/save
+	gDEFAULT_CONN_MAX_IDLE_COUNT = 10 // Max idle connection count in pool.
+	gDEFAULT_CONN_MAX_LIFE_TIME  = 30 // Max life time for per connection in pool in seconds.
 )
 
 var (
+	// ErrNoRows is alias of sql.ErrNoRows.
+	ErrNoRows = sql.ErrNoRows
+
 	// instances is the management map for instances.
 	instances = gmap.NewStrAnyMap(true)
+
 	// driverMap manages all custom registered driver.
 	driverMap = map[string]Driver{
 		"mysql":  &DriverMysql{},
@@ -201,7 +255,24 @@ var (
 		"oracle": &DriverOracle{},
 		"sqlite": &DriverSqlite{},
 	}
+
+	// lastOperatorRegPattern is the regular expression pattern for a string
+	// which has operator at its tail.
+	lastOperatorRegPattern = `[<>=]+\s*$`
+
+	// regularFieldNameRegPattern is the regular expression pattern for a string
+	// which is a regular field name of table.
+	regularFieldNameRegPattern = `^[\w\.\-]+$`
+
+	// allDryRun sets dry-run feature for all database connections.
+	// It is commonly used for command options for convenience.
+	allDryRun = false
 )
+
+func init() {
+	// allDryRun is initialized from environment or command options.
+	allDryRun = cmdenv.Get("gf.gdb.dryrun", false).Bool()
+}
 
 // Register registers custom database driver to gdb.
 func Register(name string, driver Driver) error {
@@ -212,10 +283,10 @@ func Register(name string, driver Driver) error {
 // New creates and returns an ORM object with global configurations.
 // The parameter <name> specifies the configuration group name,
 // which is DEFAULT_GROUP_NAME in default.
-func New(name ...string) (db DB, err error) {
-	group := configs.group
-	if len(name) > 0 && name[0] != "" {
-		group = name[0]
+func New(group ...string) (db DB, err error) {
+	groupName := configs.group
+	if len(group) > 0 && group[0] != "" {
+		groupName = group[0]
 	}
 	configs.RLock()
 	defer configs.RUnlock()
@@ -223,16 +294,18 @@ func New(name ...string) (db DB, err error) {
 	if len(configs.config) < 1 {
 		return nil, errors.New("empty database configuration")
 	}
-	if _, ok := configs.config[group]; ok {
-		if node, err := getConfigNodeByGroup(group, true); err == nil {
+	if _, ok := configs.config[groupName]; ok {
+		if node, err := getConfigNodeByGroup(groupName, true); err == nil {
 			c := &Core{
-				group:           group,
-				debug:           gtype.NewBool(),
-				cache:           gcache.New(),
-				schema:          gtype.NewString(),
-				logger:          glog.New(),
-				prefix:          node.Prefix,
-				maxConnLifetime: gDEFAULT_CONN_MAX_LIFE_TIME, // Default max connection life time if user does not configure.
+				group:            groupName,
+				debug:            gtype.NewBool(),
+				cache:            gcache.New(),
+				schema:           gtype.NewString(),
+				dryrun:           gtype.NewBool(),
+				logger:           glog.New(),
+				prefix:           node.Prefix,
+				maxIdleConnCount: gDEFAULT_CONN_MAX_IDLE_COUNT,
+				maxConnLifetime:  gDEFAULT_CONN_MAX_LIFE_TIME, // Default max connection life time if user does not configure.
 			}
 			if v, ok := driverMap[node.Type]; ok {
 				c.DB, err = v.New(c, node)
@@ -247,7 +320,7 @@ func New(name ...string) (db DB, err error) {
 			return nil, err
 		}
 	} else {
-		return nil, errors.New(fmt.Sprintf(`database configuration node "%s" is not found`, group))
+		return nil, errors.New(fmt.Sprintf(`database configuration node "%s" is not found`, groupName))
 	}
 }
 
@@ -365,10 +438,11 @@ func (c *Core) getSqlDb(master bool, schema ...string) (sqlDb *sql.DB, err error
 		node = &n
 	}
 	// Cache the underlying connection pool object by node.
-	v := c.cache.GetOrSetFuncLock(node.String(), func() interface{} {
+	v, _ := gcache.GetOrSetFuncLock(node.String(), func() (interface{}, error) {
 		sqlDb, err = c.DB.Open(node)
 		if err != nil {
-			return nil
+			intlog.Printf("DB open failed: %v, %+v", err, node)
+			return nil, err
 		}
 		if c.maxIdleConnCount > 0 {
 			sqlDb.SetMaxIdleConns(c.maxIdleConnCount)
@@ -387,13 +461,16 @@ func (c *Core) getSqlDb(master bool, schema ...string) (sqlDb *sql.DB, err error
 		} else if node.MaxConnLifetime > 0 {
 			sqlDb.SetConnMaxLifetime(node.MaxConnLifetime * time.Second)
 		}
-		return sqlDb
+		return sqlDb, nil
 	}, 0)
 	if v != nil && sqlDb == nil {
 		sqlDb = v.(*sql.DB)
 	}
 	if node.Debug {
 		c.DB.SetDebug(node.Debug)
+	}
+	if node.Debug {
+		c.DB.SetDryRun(node.DryRun)
 	}
 	return
 }

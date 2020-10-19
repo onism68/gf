@@ -7,7 +7,6 @@
 package ghttp_test
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -18,15 +17,15 @@ import (
 )
 
 func Test_Context(t *testing.T) {
-	p := ports.PopRand()
+	p, _ := ports.PopRand()
 	s := g.Server(p)
 	s.Group("/", func(group *ghttp.RouterGroup) {
 		group.Middleware(func(r *ghttp.Request) {
-			r.Context = context.WithValue(r.Context, "traceid", 123)
+			r.SetCtxVar("traceid", 123)
 			r.Middleware.Next()
 		})
 		group.GET("/", func(r *ghttp.Request) {
-			r.Response.Write(r.Context.Value("traceid"))
+			r.Response.Write(r.GetCtxVar("traceid"))
 		})
 	})
 	s.SetPort(p)
@@ -35,10 +34,10 @@ func Test_Context(t *testing.T) {
 	defer s.Shutdown()
 
 	time.Sleep(100 * time.Millisecond)
-	gtest.Case(t, func() {
+	gtest.C(t, func(t *gtest.T) {
 		client := ghttp.NewClient()
 		client.SetPrefix(fmt.Sprintf("http://127.0.0.1:%d", p))
 
-		gtest.Assert(client.GetContent("/"), `123`)
+		t.Assert(client.GetContent("/"), `123`)
 	})
 }

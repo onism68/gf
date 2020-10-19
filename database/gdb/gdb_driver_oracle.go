@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/gogf/gf/internal/intlog"
+	"github.com/gogf/gf/os/gcache"
 	"github.com/gogf/gf/text/gstr"
 	"reflect"
 	"strconv"
@@ -64,67 +65,66 @@ func (d *DriverOracle) GetChars() (charLeft string, charRight string) {
 }
 
 // HandleSqlBeforeCommit deals with the sql string before commits it to underlying sql driver.
-func (d *DriverOracle) HandleSqlBeforeCommit(link Link, query string, args []interface{}) (string, []interface{}) {
+func (d *DriverOracle) HandleSqlBeforeCommit(link Link, sql string, args []interface{}) (string, []interface{}) {
 	var index int
-	// Convert place holder char '?' to string ":x".
-	str, _ := gregex.ReplaceStringFunc("\\?", query, func(s string) string {
+	// Convert place holder char '?' to string ":vx".
+	str, _ := gregex.ReplaceStringFunc("\\?", sql, func(s string) string {
 		index++
-		return fmt.Sprintf(":%d", index)
+		return fmt.Sprintf(":v%d", index)
 	})
 	str, _ = gregex.ReplaceString("\"", "", str)
 	return d.parseSql(str), args
 }
 
+// parseSql does some replacement of the sql before commits it to underlying driver,
+// for support of oracle server.
 func (d *DriverOracle) parseSql(sql string) string {
-	patten := `^\s*(?i)(SELECT)|(LIMIT\s*(\d+)\s*,\s*(\d+))`
-	if gregex.IsMatchString(patten, sql) == false {
+	var (
+		patten      = `^\s*(?i)(SELECT)|(LIMIT\s*(\d+)\s*,{0,1}\s*(\d*))`
+		allMatch, _ = gregex.MatchAllString(patten, sql)
+	)
+	if len(allMatch) == 0 {
 		return sql
 	}
-
-	res, err := gregex.MatchAllString(patten, sql)
-	if err != nil {
-		return ""
-	}
-
-	index := 0
-	keyword := strings.TrimSpace(res[index][0])
-	keyword = strings.ToUpper(keyword)
-
+	var (
+		index   = 0
+		keyword = strings.ToUpper(strings.TrimSpace(allMatch[index][0]))
+	)
 	index++
 	switch keyword {
 	case "SELECT":
-		// 不含LIMIT关键字则不处理
-		if len(res) < 2 || (strings.HasPrefix(res[index][0], "LIMIT") == false && strings.HasPrefix(res[index][0], "limit") == false) {
+		if len(allMatch) < 2 || strings.HasPrefix(allMatch[index][0], "LIMIT") == false {
 			break
 		}
-
-		// 取limit前面的字符串
 		if gregex.IsMatchString("((?i)SELECT)(.+)((?i)LIMIT)", sql) == false {
 			break
 		}
-
 		queryExpr, _ := gregex.MatchString("((?i)SELECT)(.+)((?i)LIMIT)", sql)
-		if len(queryExpr) != 4 || strings.EqualFold(queryExpr[1], "SELECT") == false || strings.EqualFold(queryExpr[3], "LIMIT") == false {
+		if len(queryExpr) != 4 ||
+			strings.EqualFold(queryExpr[1], "SELECT") == false ||
+			strings.EqualFold(queryExpr[3], "LIMIT") == false {
 			break
 		}
-
-		// 取limit后面的取值范围
 		first, limit := 0, 0
-		for i := 1; i < len(res[index]); i++ {
-			if len(strings.TrimSpace(res[index][i])) == 0 {
+		for i := 1; i < len(allMatch[index]); i++ {
+			if len(strings.TrimSpace(allMatch[index][i])) == 0 {
 				continue
 			}
 
-			if strings.HasPrefix(res[index][i], "LIMIT") || strings.HasPrefix(res[index][i], "limit") {
-				first, _ = strconv.Atoi(res[index][i+1])
-				limit, _ = strconv.Atoi(res[index][i+2])
+			if strings.HasPrefix(allMatch[index][i], "LIMIT") {
+				if allMatch[index][i+2] != "" {
+					first, _ = strconv.Atoi(allMatch[index][i+1])
+					limit, _ = strconv.Atoi(allMatch[index][i+2])
+				} else {
+					limit, _ = strconv.Atoi(allMatch[index][i+1])
+				}
 				break
 			}
 		}
-
-		// 也可以使用between,据说这种写法的性能会比between好点,里层SQL中的ROWNUM_ >= limit可以缩小查询后的数据集规模
 		sql = fmt.Sprintf(
-			"SELECT * FROM (SELECT GFORM.*, ROWNUM ROWNUM_ FROM (%s %s) GFORM WHERE ROWNUM <= %d) WHERE ROWNUM_ >= %d",
+			"SELECT * FROM "+
+				"(SELECT GFORM.*, ROWNUM ROWNUM_ FROM (%s %s) GFORM WHERE ROWNUM <= %d)"+
+				" WHERE ROWNUM_ >= %d",
 			queryExpr[1], queryExpr[2], limit, first,
 		)
 	}
@@ -150,26 +150,33 @@ func (d *DriverOracle) Tables(schema ...string) (tables []string, err error) {
 
 // TableFields retrieves and returns the fields information of specified table of current schema.
 func (d *DriverOracle) TableFields(table string, schema ...string) (fields map[string]*TableField, err error) {
-	table = gstr.Trim(table)
+	charL, charR := d.GetChars()
+	table = gstr.Trim(table, charL+charR)
 	if gstr.Contains(table, " ") {
-		panic("function TableFields supports only single table operations")
+		return nil, errors.New("function TableFields supports only single table operations")
 	}
 	checkSchema := d.DB.GetSchema()
 	if len(schema) > 0 && schema[0] != "" {
 		checkSchema = schema[0]
 	}
-	v := d.DB.GetCache().GetOrSetFunc(
+	v, _ := gcache.GetOrSetFunc(
 		fmt.Sprintf(`oracle_table_fields_%s_%s`, table, checkSchema),
-		func() interface{} {
+		func() (interface{}, error) {
 			result := (Result)(nil)
-			result, err = d.DB.GetAll(fmt.Sprintf(`
-			SELECT COLUMN_NAME AS FIELD, CASE DATA_TYPE 
-			    WHEN 'NUMBER' THEN DATA_TYPE||'('||DATA_PRECISION||','||DATA_SCALE||')' 
-				WHEN 'FLOAT' THEN DATA_TYPE||'('||DATA_PRECISION||','||DATA_SCALE||')' 
-				ELSE DATA_TYPE||'('||DATA_LENGTH||')' END AS TYPE  
-			FROM USER_TAB_COLUMNS WHERE TABLE_NAME = '%s' ORDER BY COLUMN_ID`, strings.ToUpper(table)))
+			structureSql := fmt.Sprintf(`
+SELECT 
+	COLUMN_NAME AS FIELD, 
+	CASE DATA_TYPE  
+	WHEN 'NUMBER' THEN DATA_TYPE||'('||DATA_PRECISION||','||DATA_SCALE||')' 
+	WHEN 'FLOAT' THEN DATA_TYPE||'('||DATA_PRECISION||','||DATA_SCALE||')' 
+	ELSE DATA_TYPE||'('||DATA_LENGTH||')' END AS TYPE  
+FROM USER_TAB_COLUMNS WHERE TABLE_NAME = '%s' ORDER BY COLUMN_ID`,
+				strings.ToUpper(table),
+			)
+			structureSql, _ = gregex.ReplaceString(`[\n\r\s]+`, " ", gstr.Trim(structureSql))
+			result, err = d.DB.GetAll(structureSql)
 			if err != nil {
-				return nil
+				return nil, err
 			}
 			fields = make(map[string]*TableField)
 			for i, m := range result {
@@ -179,7 +186,7 @@ func (d *DriverOracle) TableFields(table string, schema ...string) (fields map[s
 					Type:  strings.ToLower(m["TYPE"].String()),
 				}
 			}
-			return fields
+			return fields, nil
 		}, 0)
 	if err == nil {
 		fields = v.(map[string]*TableField)
@@ -189,24 +196,26 @@ func (d *DriverOracle) TableFields(table string, schema ...string) (fields map[s
 
 func (d *DriverOracle) getTableUniqueIndex(table string) (fields map[string]map[string]string, err error) {
 	table = strings.ToUpper(table)
-	v := d.DB.GetCache().GetOrSetFunc("table_unique_index_"+table, func() interface{} {
-		res := (Result)(nil)
-		res, err = d.DB.GetAll(fmt.Sprintf(`
+	v, _ := gcache.GetOrSetFunc(
+		"table_unique_index_"+table,
+		func() (interface{}, error) {
+			res := (Result)(nil)
+			res, err = d.DB.GetAll(fmt.Sprintf(`
 		SELECT INDEX_NAME,COLUMN_NAME,CHAR_LENGTH FROM USER_IND_COLUMNS 
 		WHERE TABLE_NAME = '%s' 
 		AND INDEX_NAME IN(SELECT INDEX_NAME FROM USER_INDEXES WHERE TABLE_NAME='%s' AND UNIQUENESS='UNIQUE') 
 		ORDER BY INDEX_NAME,COLUMN_POSITION`, table, table))
-		if err != nil {
-			return nil
-		}
-		fields := make(map[string]map[string]string)
-		for _, v := range res {
-			mm := make(map[string]string)
-			mm[v["COLUMN_NAME"].String()] = v["CHAR_LENGTH"].String()
-			fields[v["INDEX_NAME"].String()] = mm
-		}
-		return fields
-	}, 0)
+			if err != nil {
+				return nil, err
+			}
+			fields := make(map[string]map[string]string)
+			for _, v := range res {
+				mm := make(map[string]string)
+				mm[v["COLUMN_NAME"].String()] = v["CHAR_LENGTH"].String()
+				fields[v["INDEX_NAME"].String()] = mm
+			}
+			return fields, nil
+		}, 0)
 	if err == nil {
 		fields = v.(map[string]map[string]string)
 	}
@@ -232,7 +241,7 @@ func (d *DriverOracle) DoInsert(link Link, table string, data interface{}, optio
 	case reflect.Map:
 		fallthrough
 	case reflect.Struct:
-		dataMap = DataToMapDeep(data)
+		dataMap = ConvertDataForTableRecord(data)
 	default:
 		return result, errors.New(fmt.Sprint("unsupported data type:", kind))
 	}
@@ -352,12 +361,12 @@ func (d *DriverOracle) DoBatchInsert(link Link, table string, list interface{}, 
 		case reflect.Array:
 			listMap = make(List, rv.Len())
 			for i := 0; i < rv.Len(); i++ {
-				listMap[i] = DataToMapDeep(rv.Index(i).Interface())
+				listMap[i] = ConvertDataForTableRecord(rv.Index(i).Interface())
 			}
 		case reflect.Map:
 			fallthrough
 		case reflect.Struct:
-			listMap = List{Map(DataToMapDeep(list))}
+			listMap = List{Map(ConvertDataForTableRecord(list))}
 		default:
 			return result, errors.New(fmt.Sprint("unsupported list type:", kind))
 		}

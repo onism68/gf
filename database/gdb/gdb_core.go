@@ -12,23 +12,14 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"regexp"
 	"strings"
+
+	"github.com/gogf/gf/internal/utils"
 
 	"github.com/gogf/gf/container/gvar"
 	"github.com/gogf/gf/os/gtime"
 	"github.com/gogf/gf/text/gregex"
 	"github.com/gogf/gf/util/gconv"
-)
-
-const (
-	gPATH_FILTER_KEY = "/database/gdb/gdb"
-)
-
-var (
-	// lastOperatorReg is the regular expression object for a string
-	// which has operator at its tail.
-	lastOperatorReg = regexp.MustCompile(`[<>=]+\s*$`)
 )
 
 // Master creates and returns a connection from master node if master-slave configured.
@@ -45,75 +36,85 @@ func (c *Core) Slave() (*sql.DB, error) {
 
 // Query commits one query SQL to underlying driver and returns the execution result.
 // It is most commonly used for data querying.
-func (c *Core) Query(query string, args ...interface{}) (rows *sql.Rows, err error) {
+func (c *Core) Query(sql string, args ...interface{}) (rows *sql.Rows, err error) {
 	link, err := c.DB.Slave()
 	if err != nil {
 		return nil, err
 	}
-	return c.DB.DoQuery(link, query, args...)
+	return c.DB.DoQuery(link, sql, args...)
 }
 
-// doQuery commits the query string and its arguments to underlying driver
+// DoQuery commits the sql string and its arguments to underlying driver
 // through given link object and returns the execution result.
-func (c *Core) DoQuery(link Link, query string, args ...interface{}) (rows *sql.Rows, err error) {
-	query, args = formatQuery(query, args)
-	query, args = c.DB.HandleSqlBeforeCommit(link, query, args)
+func (c *Core) DoQuery(link Link, sql string, args ...interface{}) (rows *sql.Rows, err error) {
+	sql, args = formatSql(sql, args)
+	sql, args = c.DB.HandleSqlBeforeCommit(link, sql, args)
 	if c.DB.GetDebug() {
 		mTime1 := gtime.TimestampMilli()
-		rows, err = link.Query(query, args...)
+		rows, err = link.Query(sql, args...)
 		mTime2 := gtime.TimestampMilli()
 		s := &Sql{
-			Sql:    query,
+			Sql:    sql,
 			Args:   args,
-			Format: bindArgsToQuery(query, args),
+			Format: FormatSqlWithArgs(sql, args),
 			Error:  err,
 			Start:  mTime1,
 			End:    mTime2,
+			Group:  c.DB.GetGroup(),
 		}
 		c.writeSqlToLogger(s)
 	} else {
-		rows, err = link.Query(query, args...)
+		rows, err = link.Query(sql, args...)
 	}
 	if err == nil {
 		return rows, nil
 	} else {
-		err = formatError(err, query, args...)
+		err = formatError(err, sql, args...)
 	}
 	return nil, err
 }
 
 // Exec commits one query SQL to underlying driver and returns the execution result.
 // It is most commonly used for data inserting and updating.
-func (c *Core) Exec(query string, args ...interface{}) (result sql.Result, err error) {
+func (c *Core) Exec(sql string, args ...interface{}) (result sql.Result, err error) {
 	link, err := c.DB.Master()
 	if err != nil {
 		return nil, err
 	}
-	return c.DB.DoExec(link, query, args...)
+	return c.DB.DoExec(link, sql, args...)
 }
 
-// doExec commits the query string and its arguments to underlying driver
+// DoExec commits the sql string and its arguments to underlying driver
 // through given link object and returns the execution result.
-func (c *Core) DoExec(link Link, query string, args ...interface{}) (result sql.Result, err error) {
-	query, args = formatQuery(query, args)
-	query, args = c.DB.HandleSqlBeforeCommit(link, query, args)
+func (c *Core) DoExec(link Link, sql string, args ...interface{}) (result sql.Result, err error) {
+	sql, args = formatSql(sql, args)
+	sql, args = c.DB.HandleSqlBeforeCommit(link, sql, args)
 	if c.DB.GetDebug() {
 		mTime1 := gtime.TimestampMilli()
-		result, err = link.Exec(query, args...)
+		if !c.DB.GetDryRun() {
+			result, err = link.Exec(sql, args...)
+		} else {
+			result = new(SqlResult)
+		}
 		mTime2 := gtime.TimestampMilli()
 		s := &Sql{
-			Sql:    query,
+			Sql:    sql,
 			Args:   args,
-			Format: bindArgsToQuery(query, args),
+			Format: FormatSqlWithArgs(sql, args),
 			Error:  err,
 			Start:  mTime1,
 			End:    mTime2,
+			Group:  c.DB.GetGroup(),
 		}
 		c.writeSqlToLogger(s)
 	} else {
-		result, err = link.Exec(query, args...)
+		if !c.DB.GetDryRun() {
+			result, err = link.Exec(sql, args...)
+		} else {
+			result = new(SqlResult)
+		}
 	}
-	return result, formatError(err, query, args...)
+	return result, formatError(err, sql, args...)
 }
 
 // Prepare creates a prepared statement for later queries or executions.
@@ -124,7 +125,7 @@ func (c *Core) DoExec(link Link, query string, args ...interface{}) (result sql.
 //
 // The parameter <execOnMaster> specifies whether executing the sql on master node,
 // or else it executes the sql on slave node if master-slave configured.
-func (c *Core) Prepare(query string, execOnMaster ...bool) (*sql.Stmt, error) {
+func (c *Core) Prepare(sql string, execOnMaster ...bool) (*sql.Stmt, error) {
 	err := (error)(nil)
 	link := (Link)(nil)
 	if len(execOnMaster) > 0 && execOnMaster[0] {
@@ -136,28 +137,28 @@ func (c *Core) Prepare(query string, execOnMaster ...bool) (*sql.Stmt, error) {
 			return nil, err
 		}
 	}
-	return c.DB.DoPrepare(link, query)
+	return c.DB.DoPrepare(link, sql)
 }
 
 // doPrepare calls prepare function on given link object and returns the statement object.
-func (c *Core) DoPrepare(link Link, query string) (*sql.Stmt, error) {
-	return link.Prepare(query)
+func (c *Core) DoPrepare(link Link, sql string) (*sql.Stmt, error) {
+	return link.Prepare(sql)
 }
 
 // GetAll queries and returns data records from database.
-func (c *Core) GetAll(query string, args ...interface{}) (Result, error) {
-	return c.DB.DoGetAll(nil, query, args...)
+func (c *Core) GetAll(sql string, args ...interface{}) (Result, error) {
+	return c.DB.DoGetAll(nil, sql, args...)
 }
 
-// doGetAll queries and returns data records from database.
-func (c *Core) DoGetAll(link Link, query string, args ...interface{}) (result Result, err error) {
+// DoGetAll queries and returns data records from database.
+func (c *Core) DoGetAll(link Link, sql string, args ...interface{}) (result Result, err error) {
 	if link == nil {
 		link, err = c.DB.Slave()
 		if err != nil {
 			return nil, err
 		}
 	}
-	rows, err := c.DB.DoQuery(link, query, args...)
+	rows, err := c.DB.DoQuery(link, sql, args...)
 	if err != nil || rows == nil {
 		return nil, err
 	}
@@ -166,8 +167,8 @@ func (c *Core) DoGetAll(link Link, query string, args ...interface{}) (result Re
 }
 
 // GetOne queries and returns one record from database.
-func (c *Core) GetOne(query string, args ...interface{}) (Record, error) {
-	list, err := c.DB.GetAll(query, args...)
+func (c *Core) GetOne(sql string, args ...interface{}) (Record, error) {
+	list, err := c.DB.GetAll(sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -179,8 +180,8 @@ func (c *Core) GetOne(query string, args ...interface{}) (Record, error) {
 
 // GetArray queries and returns data values as slice from database.
 // Note that if there're multiple columns in the result, it returns just one column values randomly.
-func (c *Core) GetArray(query string, args ...interface{}) ([]Value, error) {
-	all, err := c.DB.DoGetAll(nil, query, args...)
+func (c *Core) GetArray(sql string, args ...interface{}) ([]Value, error) {
+	all, err := c.DB.DoGetAll(nil, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -189,26 +190,20 @@ func (c *Core) GetArray(query string, args ...interface{}) ([]Value, error) {
 
 // GetStruct queries one record from database and converts it to given struct.
 // The parameter <pointer> should be a pointer to struct.
-func (c *Core) GetStruct(pointer interface{}, query string, args ...interface{}) error {
-	one, err := c.DB.GetOne(query, args...)
+func (c *Core) GetStruct(pointer interface{}, sql string, args ...interface{}) error {
+	one, err := c.DB.GetOne(sql, args...)
 	if err != nil {
 		return err
-	}
-	if len(one) == 0 {
-		return sql.ErrNoRows
 	}
 	return one.Struct(pointer)
 }
 
 // GetStructs queries records from database and converts them to given struct.
 // The parameter <pointer> should be type of struct slice: []struct/[]*struct.
-func (c *Core) GetStructs(pointer interface{}, query string, args ...interface{}) error {
-	all, err := c.DB.GetAll(query, args...)
+func (c *Core) GetStructs(pointer interface{}, sql string, args ...interface{}) error {
+	all, err := c.DB.GetAll(sql, args...)
 	if err != nil {
 		return err
-	}
-	if len(all) == 0 {
-		return sql.ErrNoRows
 	}
 	return all.Structs(pointer)
 }
@@ -219,7 +214,7 @@ func (c *Core) GetStructs(pointer interface{}, query string, args ...interface{}
 // If parameter <pointer> is type of struct pointer, it calls GetStruct internally for
 // the conversion. If parameter <pointer> is type of slice, it calls GetStructs internally
 // for conversion.
-func (c *Core) GetScan(pointer interface{}, query string, args ...interface{}) error {
+func (c *Core) GetScan(pointer interface{}, sql string, args ...interface{}) error {
 	t := reflect.TypeOf(pointer)
 	k := t.Kind()
 	if k != reflect.Ptr {
@@ -228,9 +223,9 @@ func (c *Core) GetScan(pointer interface{}, query string, args ...interface{}) e
 	k = t.Elem().Kind()
 	switch k {
 	case reflect.Array, reflect.Slice:
-		return c.DB.GetStructs(pointer, query, args...)
+		return c.DB.GetStructs(pointer, sql, args...)
 	case reflect.Struct:
-		return c.DB.GetStruct(pointer, query, args...)
+		return c.DB.GetStruct(pointer, sql, args...)
 	}
 	return fmt.Errorf("element type should be type of struct/slice, unsupported: %v", k)
 }
@@ -238,25 +233,25 @@ func (c *Core) GetScan(pointer interface{}, query string, args ...interface{}) e
 // GetValue queries and returns the field value from database.
 // The sql should queries only one field from database, or else it returns only one
 // field of the result.
-func (c *Core) GetValue(query string, args ...interface{}) (Value, error) {
-	one, err := c.DB.GetOne(query, args...)
+func (c *Core) GetValue(sql string, args ...interface{}) (Value, error) {
+	one, err := c.DB.GetOne(sql, args...)
 	if err != nil {
-		return nil, err
+		return gvar.New(nil), err
 	}
 	for _, v := range one {
 		return v, nil
 	}
-	return nil, nil
+	return gvar.New(nil), nil
 }
 
 // GetCount queries and returns the count from database.
-func (c *Core) GetCount(query string, args ...interface{}) (int, error) {
+func (c *Core) GetCount(sql string, args ...interface{}) (int, error) {
 	// If the query fields do not contains function "COUNT",
-	// it replaces the query string and adds the "COUNT" function to the fields.
-	if !gregex.IsMatchString(`(?i)SELECT\s+COUNT\(.+\)\s+FROM`, query) {
-		query, _ = gregex.ReplaceString(`(?i)(SELECT)\s+(.+)\s+(FROM)`, `$1 COUNT($2) $3`, query)
+	// it replaces the sql string and adds the "COUNT" function to the fields.
+	if !gregex.IsMatchString(`(?i)SELECT\s+COUNT\(.+\)\s+FROM`, sql) {
+		sql, _ = gregex.ReplaceString(`(?i)(SELECT)\s+(.+)\s+(FROM)`, `$1 COUNT($2) $3`, sql)
 	}
-	value, err := c.DB.GetValue(query, args...)
+	value, err := c.DB.GetValue(sql, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -301,6 +296,39 @@ func (c *Core) Begin() (*TX, error) {
 	}
 }
 
+// Transaction wraps the transaction logic using function <f>.
+// It rollbacks the transaction and returns the error from function <f> if
+// it returns non-nil error. It commits the transaction and returns nil if
+// function <f> returns nil.
+//
+// Note that, you should not Commit or Rollback the transaction in function <f>
+// as it is automatically handled by this function.
+func (c *Core) Transaction(f func(tx *TX) error) (err error) {
+	var tx *TX
+	tx, err = c.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err == nil {
+			if e := recover(); e != nil {
+				err = fmt.Errorf("%v", e)
+			}
+		}
+		if err != nil {
+			if e := tx.Rollback(); e != nil {
+				err = e
+			}
+		} else {
+			if e := tx.Commit(); e != nil {
+				err = e
+			}
+		}
+	}()
+	err = f(tx)
+	return
+}
+
 // Insert does "INSERT INTO ..." statement for the table.
 // If there's already one unique record of the data in the table, it returns error.
 //
@@ -311,7 +339,10 @@ func (c *Core) Begin() (*TX, error) {
 //
 // The parameter <batch> specifies the batch operation count when given data is slice.
 func (c *Core) Insert(table string, data interface{}, batch ...int) (sql.Result, error) {
-	return c.DB.DoInsert(nil, table, data, gINSERT_OPTION_DEFAULT, batch...)
+	if len(batch) > 0 {
+		return c.Model(table).Data(data).Batch(batch[0]).Insert()
+	}
+	return c.Model(table).Data(data).Insert()
 }
 
 // InsertIgnore does "INSERT IGNORE INTO ..." statement for the table.
@@ -324,7 +355,10 @@ func (c *Core) Insert(table string, data interface{}, batch ...int) (sql.Result,
 //
 // The parameter <batch> specifies the batch operation count when given data is slice.
 func (c *Core) InsertIgnore(table string, data interface{}, batch ...int) (sql.Result, error) {
-	return c.DB.DoInsert(nil, table, data, gINSERT_OPTION_IGNORE, batch...)
+	if len(batch) > 0 {
+		return c.Model(table).Data(data).Batch(batch[0]).InsertIgnore()
+	}
+	return c.Model(table).Data(data).InsertIgnore()
 }
 
 // Replace does "REPLACE INTO ..." statement for the table.
@@ -340,7 +374,10 @@ func (c *Core) InsertIgnore(table string, data interface{}, batch ...int) (sql.R
 // If given data is type of slice, it then does batch replacing, and the optional parameter
 // <batch> specifies the batch operation count.
 func (c *Core) Replace(table string, data interface{}, batch ...int) (sql.Result, error) {
-	return c.DB.DoInsert(nil, table, data, gINSERT_OPTION_REPLACE, batch...)
+	if len(batch) > 0 {
+		return c.Model(table).Data(data).Batch(batch[0]).Replace()
+	}
+	return c.Model(table).Data(data).Replace()
 }
 
 // Save does "INSERT INTO ... ON DUPLICATE KEY UPDATE..." statement for the table.
@@ -355,11 +392,14 @@ func (c *Core) Replace(table string, data interface{}, batch ...int) (sql.Result
 // If given data is type of slice, it then does batch saving, and the optional parameter
 // <batch> specifies the batch operation count.
 func (c *Core) Save(table string, data interface{}, batch ...int) (sql.Result, error) {
-	return c.DB.DoInsert(nil, table, data, gINSERT_OPTION_SAVE, batch...)
+	if len(batch) > 0 {
+		return c.Model(table).Data(data).Batch(batch[0]).Save()
+	}
+	return c.Model(table).Data(data).Save()
 }
 
 // doInsert inserts or updates data for given table.
-//
+// This function is usually used for custom interface definition, you do not need call it manually.
 // The parameter <data> can be type of map/gmap/struct/*struct/[]map/[]struct, etc.
 // Eg:
 // Data(g.Map{"uid": 10000, "name":"john"})
@@ -371,13 +411,15 @@ func (c *Core) Save(table string, data interface{}, batch ...int) (sql.Result, e
 // 2: save:    if there's unique/primary key in the data, it updates it or else inserts a new one;
 // 3: ignore:  if there's unique/primary key in the data, it ignores the inserting;
 func (c *Core) DoInsert(link Link, table string, data interface{}, option int, batch ...int) (result sql.Result, err error) {
-	var fields []string
-	var values []string
-	var params []interface{}
-	var dataMap Map
 	table = c.DB.QuotePrefixTableName(table)
-	reflectValue := reflect.ValueOf(data)
-	reflectKind := reflectValue.Kind()
+	var (
+		fields       []string
+		values       []string
+		params       []interface{}
+		dataMap      Map
+		reflectValue = reflect.ValueOf(data)
+		reflectKind  = reflectValue.Kind()
+	)
 	if reflectKind == reflect.Ptr {
 		reflectValue = reflectValue.Elem()
 		reflectKind = reflectValue.Kind()
@@ -385,24 +427,37 @@ func (c *Core) DoInsert(link Link, table string, data interface{}, option int, b
 	switch reflectKind {
 	case reflect.Slice, reflect.Array:
 		return c.DB.DoBatchInsert(link, table, data, option, batch...)
-	case reflect.Map, reflect.Struct:
-		dataMap = DataToMapDeep(data)
+	case reflect.Struct:
+		if _, ok := data.(apiInterfaces); ok {
+			return c.DB.DoBatchInsert(link, table, data, option, batch...)
+		} else {
+			dataMap = ConvertDataForTableRecord(data)
+		}
+	case reflect.Map:
+		dataMap = ConvertDataForTableRecord(data)
 	default:
 		return result, errors.New(fmt.Sprint("unsupported data type:", reflectKind))
 	}
 	if len(dataMap) == 0 {
 		return nil, errors.New("data cannot be empty")
 	}
-	charL, charR := c.DB.GetChars()
+	var (
+		charL, charR = c.DB.GetChars()
+		operation    = GetInsertOperationByOption(option)
+		updateStr    = ""
+	)
 	for k, v := range dataMap {
 		fields = append(fields, charL+k+charR)
 		values = append(values, "?")
 		params = append(params, v)
 	}
-	operation := GetInsertOperationByOption(option)
-	updateStr := ""
 	if option == gINSERT_OPTION_SAVE {
 		for k, _ := range dataMap {
+			// If it's SAVE operation,
+			// do not automatically update the creating time.
+			if utils.EqualFoldWithoutChars(k, gSOFT_FIELD_NAME_CREATE) {
+				continue
+			}
 			if len(updateStr) > 0 {
 				updateStr += ","
 			}
@@ -433,45 +488,63 @@ func (c *Core) DoInsert(link Link, table string, data interface{}, option int, b
 // BatchInsert batch inserts data.
 // The parameter <list> must be type of slice of map or struct.
 func (c *Core) BatchInsert(table string, list interface{}, batch ...int) (sql.Result, error) {
-	return c.DB.DoBatchInsert(nil, table, list, gINSERT_OPTION_DEFAULT, batch...)
+	if len(batch) > 0 {
+		return c.Model(table).Data(list).Batch(batch[0]).Insert()
+	}
+	return c.Model(table).Data(list).Insert()
 }
 
-// BatchInsert batch inserts data with ignore option.
+// BatchInsertIgnore batch inserts data with ignore option.
 // The parameter <list> must be type of slice of map or struct.
 func (c *Core) BatchInsertIgnore(table string, list interface{}, batch ...int) (sql.Result, error) {
-	return c.DB.DoBatchInsert(nil, table, list, gINSERT_OPTION_IGNORE, batch...)
+	if len(batch) > 0 {
+		return c.Model(table).Data(list).Batch(batch[0]).InsertIgnore()
+	}
+	return c.Model(table).Data(list).InsertIgnore()
 }
 
 // BatchReplace batch replaces data.
 // The parameter <list> must be type of slice of map or struct.
 func (c *Core) BatchReplace(table string, list interface{}, batch ...int) (sql.Result, error) {
-	return c.DB.DoBatchInsert(nil, table, list, gINSERT_OPTION_REPLACE, batch...)
+	if len(batch) > 0 {
+		return c.Model(table).Data(list).Batch(batch[0]).Replace()
+	}
+	return c.Model(table).Data(list).Replace()
 }
 
 // BatchSave batch replaces data.
 // The parameter <list> must be type of slice of map or struct.
 func (c *Core) BatchSave(table string, list interface{}, batch ...int) (sql.Result, error) {
-	return c.DB.DoBatchInsert(nil, table, list, gINSERT_OPTION_SAVE, batch...)
+	if len(batch) > 0 {
+		return c.Model(table).Data(list).Batch(batch[0]).Save()
+	}
+	return c.Model(table).Data(list).Save()
 }
 
-// doBatchInsert batch inserts/replaces/saves data.
+// DoBatchInsert batch inserts/replaces/saves data.
+// This function is usually used for custom interface definition, you do not need call it manually.
 func (c *Core) DoBatchInsert(link Link, table string, list interface{}, option int, batch ...int) (result sql.Result, err error) {
-	var keys, values []string
-	var params []interface{}
 	table = c.DB.QuotePrefixTableName(table)
-	listMap := (List)(nil)
-	switch v := list.(type) {
+	var (
+		keys    []string      // Field names.
+		values  []string      // Value holder string array, like: (?,?,?)
+		params  []interface{} // Values that will be committed to underlying database driver.
+		listMap List          // The data list that passed from caller.
+	)
+	switch value := list.(type) {
 	case Result:
-		listMap = v.List()
+		listMap = value.List()
 	case Record:
-		listMap = List{v.Map()}
+		listMap = List{value.Map()}
 	case List:
-		listMap = v
+		listMap = value
 	case Map:
-		listMap = List{v}
+		listMap = List{value}
 	default:
-		rv := reflect.ValueOf(list)
-		kind := rv.Kind()
+		var (
+			rv   = reflect.ValueOf(list)
+			kind = rv.Kind()
+		)
 		if kind == reflect.Ptr {
 			rv = rv.Elem()
 			kind = rv.Kind()
@@ -481,10 +554,23 @@ func (c *Core) DoBatchInsert(link Link, table string, list interface{}, option i
 		case reflect.Slice, reflect.Array:
 			listMap = make(List, rv.Len())
 			for i := 0; i < rv.Len(); i++ {
-				listMap[i] = DataToMapDeep(rv.Index(i).Interface())
+				listMap[i] = ConvertDataForTableRecord(rv.Index(i).Interface())
 			}
-		case reflect.Map, reflect.Struct:
-			listMap = List{DataToMapDeep(list)}
+		case reflect.Map:
+			listMap = List{ConvertDataForTableRecord(value)}
+		case reflect.Struct:
+			if v, ok := value.(apiInterfaces); ok {
+				var (
+					array = v.Interfaces()
+					list  = make(List, len(array))
+				)
+				for i := 0; i < len(array); i++ {
+					list[i] = ConvertDataForTableRecord(array[i])
+				}
+				listMap = list
+			} else {
+				listMap = List{ConvertDataForTableRecord(value)}
+			}
 		default:
 			return result, errors.New(fmt.Sprint("unsupported list type:", kind))
 		}
@@ -504,15 +590,21 @@ func (c *Core) DoBatchInsert(link Link, table string, list interface{}, option i
 		holders = append(holders, "?")
 	}
 	// Prepare the batch result pointer.
-	batchResult := new(SqlResult)
-	charL, charR := c.DB.GetChars()
-	keysStr := charL + strings.Join(keys, charR+","+charL) + charR
-	valueHolderStr := "(" + strings.Join(holders, ",") + ")"
-
-	operation := GetInsertOperationByOption(option)
-	updateStr := ""
+	var (
+		charL, charR   = c.DB.GetChars()
+		batchResult    = new(SqlResult)
+		keysStr        = charL + strings.Join(keys, charR+","+charL) + charR
+		valueHolderStr = "(" + strings.Join(holders, ",") + ")"
+		operation      = GetInsertOperationByOption(option)
+		updateStr      = ""
+	)
 	if option == gINSERT_OPTION_SAVE {
 		for _, k := range keys {
+			// If it's SAVE operation,
+			// do not automatically update the creating time.
+			if utils.EqualFoldWithoutChars(k, gSOFT_FIELD_NAME_CREATE) {
+				continue
+			}
 			if len(updateStr) > 0 {
 				updateStr += ","
 			}
@@ -580,29 +672,32 @@ func (c *Core) DoBatchInsert(link Link, table string, list interface{}, option i
 // "age IN(?,?)", 18, 50
 // User{ Id : 1, UserName : "john"}
 func (c *Core) Update(table string, data interface{}, condition interface{}, args ...interface{}) (sql.Result, error) {
-	newWhere, newArgs := formatWhere(c.DB, condition, args, false)
-	if newWhere != "" {
-		newWhere = " WHERE " + newWhere
-	}
-	return c.DB.DoUpdate(nil, table, data, newWhere, newArgs...)
+	return c.Model(table).Data(data).Where(condition, args...).Update()
 }
 
 // doUpdate does "UPDATE ... " statement for the table.
-// Also see Update.
+// This function is usually used for custom interface definition, you do not need call it manually.
 func (c *Core) DoUpdate(link Link, table string, data interface{}, condition string, args ...interface{}) (result sql.Result, err error) {
 	table = c.DB.QuotePrefixTableName(table)
-	updates := ""
-	rv := reflect.ValueOf(data)
-	kind := rv.Kind()
+	var (
+		rv   = reflect.ValueOf(data)
+		kind = rv.Kind()
+	)
 	if kind == reflect.Ptr {
 		rv = rv.Elem()
 		kind = rv.Kind()
 	}
-	params := []interface{}(nil)
+	var (
+		params  []interface{}
+		updates = ""
+	)
 	switch kind {
 	case reflect.Map, reflect.Struct:
-		var fields []string
-		for k, v := range DataToMapDeep(data) {
+		var (
+			fields  []string
+			dataMap = ConvertDataForTableRecord(data)
+		)
+		for k, v := range dataMap {
 			fields = append(fields, c.DB.QuoteWord(k)+"=?")
 			params = append(params, v)
 		}
@@ -641,15 +736,11 @@ func (c *Core) DoUpdate(link Link, table string, data interface{}, condition str
 // "age IN(?,?)", 18, 50
 // User{ Id : 1, UserName : "john"}
 func (c *Core) Delete(table string, condition interface{}, args ...interface{}) (result sql.Result, err error) {
-	newWhere, newArgs := formatWhere(c.DB, condition, args, false)
-	if newWhere != "" {
-		newWhere = " WHERE " + newWhere
-	}
-	return c.DB.DoDelete(nil, table, newWhere, newArgs...)
+	return c.Model(table).Where(condition, args...).Delete()
 }
 
-// doDelete does "DELETE FROM ... " statement for the table.
-// Also see Delete.
+// DoDelete does "DELETE FROM ... " statement for the table.
+// This function is usually used for custom interface definition, you do not need call it manually.
 func (c *Core) DoDelete(link Link, table string, condition string, args ...interface{}) (result sql.Result, err error) {
 	if link == nil {
 		if link, err = c.DB.Master(); err != nil {
@@ -676,9 +767,11 @@ func (c *Core) rowsToResult(rows *sql.Rows) (Result, error) {
 		columnTypes[k] = v.DatabaseTypeName()
 		columnNames[k] = v.Name()
 	}
-	values := make([]sql.RawBytes, len(columnNames))
-	records := make(Result, 0)
-	scanArgs := make([]interface{}, len(values))
+	var (
+		values   = make([]interface{}, len(columnNames))
+		records  = make(Result, 0)
+		scanArgs = make([]interface{}, len(values))
+	)
 	for i := range values {
 		scanArgs[i] = &values[i]
 	}
@@ -686,19 +779,12 @@ func (c *Core) rowsToResult(rows *sql.Rows) (Result, error) {
 		if err := rows.Scan(scanArgs...); err != nil {
 			return records, err
 		}
-		// Creates a new row object.
 		row := make(Record)
-		// Note that the internal looping variable <value> is type of []byte,
-		// which points to the same memory address. So it should do a copy.
 		for i, value := range values {
 			if value == nil {
 				row[columnNames[i]] = gvar.New(nil)
 			} else {
-				// As sql.RawBytes is type of slice,
-				// it should do a copy of it.
-				v := make([]byte, len(value))
-				copy(v, value)
-				row[columnNames[i]] = gvar.New(c.DB.convertValue(v, columnTypes[i]))
+				row[columnNames[i]] = gvar.New(c.DB.convertValue(value, columnTypes[i]))
 			}
 		}
 		records = append(records, row)
@@ -721,11 +807,25 @@ func (c *Core) MarshalJSON() ([]byte, error) {
 // writeSqlToLogger outputs the sql object to logger.
 // It is enabled when configuration "debug" is true.
 func (c *Core) writeSqlToLogger(v *Sql) {
-	s := fmt.Sprintf("[%d ms] %s", v.End-v.Start, v.Format)
+	s := fmt.Sprintf("[%3d ms] [%s] %s", v.End-v.Start, v.Group, v.Format)
 	if v.Error != nil {
 		s += "\nError: " + v.Error.Error()
-		c.logger.StackWithFilter(gPATH_FILTER_KEY).Error(s)
+		c.logger.Error(s)
 	} else {
-		c.logger.StackWithFilter(gPATH_FILTER_KEY).Debug(s)
+		c.logger.Debug(s)
 	}
+}
+
+// HasTable determine whether the table name exists in the database.
+func (c *Core) HasTable(name string) (bool, error) {
+	tableList, err := c.DB.Tables()
+	if err != nil {
+		return false, err
+	}
+	for _, table := range tableList {
+		if table == name {
+			return true, nil
+		}
+	}
+	return false, nil
 }

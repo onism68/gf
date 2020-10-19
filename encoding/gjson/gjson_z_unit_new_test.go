@@ -25,25 +25,47 @@ func Test_Load_NewWithTag(t *testing.T) {
 		Addr: "chengdu",
 	}
 	// JSON
-	gtest.Case(t, func() {
+	gtest.C(t, func(t *gtest.T) {
 		j := gjson.New(data)
-		gtest.AssertNE(j, nil)
-		gtest.Assert(j.Get("age-xml"), nil)
-		gtest.Assert(j.Get("age-json"), data.Age)
-		gtest.Assert(j.Get("name-xml"), nil)
-		gtest.Assert(j.Get("name-json"), data.Name)
-		gtest.Assert(j.Get("addr-xml"), nil)
-		gtest.Assert(j.Get("addr-json"), data.Addr)
+		t.AssertNE(j, nil)
+		t.Assert(j.Get("age-xml"), nil)
+		t.Assert(j.Get("age-json"), data.Age)
+		t.Assert(j.Get("name-xml"), nil)
+		t.Assert(j.Get("name-json"), data.Name)
+		t.Assert(j.Get("addr-xml"), nil)
+		t.Assert(j.Get("addr-json"), data.Addr)
 	})
 	// XML
-	gtest.Case(t, func() {
+	gtest.C(t, func(t *gtest.T) {
 		j := gjson.NewWithTag(data, "xml")
-		gtest.AssertNE(j, nil)
-		gtest.Assert(j.Get("age-xml"), data.Age)
-		gtest.Assert(j.Get("age-json"), nil)
-		gtest.Assert(j.Get("name-xml"), data.Name)
-		gtest.Assert(j.Get("name-json"), nil)
-		gtest.Assert(j.Get("addr-xml"), data.Addr)
-		gtest.Assert(j.Get("addr-json"), nil)
+		t.AssertNE(j, nil)
+		t.Assert(j.Get("age-xml"), data.Age)
+		t.Assert(j.Get("age-json"), nil)
+		t.Assert(j.Get("name-xml"), data.Name)
+		t.Assert(j.Get("name-json"), nil)
+		t.Assert(j.Get("addr-xml"), data.Addr)
+		t.Assert(j.Get("addr-json"), nil)
+	})
+}
+
+func Test_Load_New_CustomStruct(t *testing.T) {
+	type Base struct {
+		Id int
+	}
+	type User struct {
+		Base
+		Name string
+	}
+	user := new(User)
+	user.Id = 1
+	user.Name = "john"
+
+	gtest.C(t, func(t *gtest.T) {
+		j := gjson.New(user)
+		t.AssertNE(j, nil)
+
+		s, err := j.ToJsonString()
+		t.Assert(err, nil)
+		t.Assert(s == `{"Id":1,"Name":"john"}` || s == `{"Name":"john","Id":1}`, true)
 	})
 }

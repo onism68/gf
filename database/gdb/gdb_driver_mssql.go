@@ -13,11 +13,14 @@ package gdb
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
-	"github.com/gogf/gf/internal/intlog"
-	"github.com/gogf/gf/text/gstr"
+	"github.com/gogf/gf/os/gcache"
 	"strconv"
 	"strings"
+
+	"github.com/gogf/gf/internal/intlog"
+	"github.com/gogf/gf/text/gstr"
 
 	"github.com/gogf/gf/text/gregex"
 )
@@ -60,10 +63,10 @@ func (d *DriverMssql) GetChars() (charLeft string, charRight string) {
 }
 
 // HandleSqlBeforeCommit deals with the sql string before commits it to underlying sql driver.
-func (d *DriverMssql) HandleSqlBeforeCommit(link Link, query string, args []interface{}) (string, []interface{}) {
+func (d *DriverMssql) HandleSqlBeforeCommit(link Link, sql string, args []interface{}) (string, []interface{}) {
 	var index int
 	// Convert place holder char '?' to string "@px".
-	str, _ := gregex.ReplaceStringFunc("\\?", query, func(s string) string {
+	str, _ := gregex.ReplaceStringFunc("\\?", sql, func(s string) string {
 		index++
 		return fmt.Sprintf("@p%d", index)
 	})
@@ -71,6 +74,8 @@ func (d *DriverMssql) HandleSqlBeforeCommit(link Link, query string, args []inte
 	return d.parseSql(str), args
 }
 
+// parseSql does some replacement of the sql before commits it to underlying driver,
+// for support of microsoft sql server.
 func (d *DriverMssql) parseSql(sql string) string {
 	// SELECT * FROM USER WHERE ID=1 LIMIT 1
 	if m, _ := gregex.MatchString(`^SELECT(.+)LIMIT 1$`, sql); len(m) > 1 {
@@ -91,22 +96,20 @@ func (d *DriverMssql) parseSql(sql string) string {
 	index++
 	switch keyword {
 	case "SELECT":
-		// 不含LIMIT关键字则不处理
+		// LIMIT statement checks.
 		if len(res) < 2 ||
 			(strings.HasPrefix(res[index][0], "LIMIT") == false &&
 				strings.HasPrefix(res[index][0], "limit") == false) {
 			break
 		}
-		// 不含LIMIT则不处理
 		if gregex.IsMatchString("((?i)SELECT)(.+)((?i)LIMIT)", sql) == false {
 			break
 		}
-		// 判断SQL中是否含有order by
+		// ORDER BY statement checks.
 		selectStr := ""
 		orderStr := ""
 		haveOrder := gregex.IsMatchString("((?i)SELECT)(.+)((?i)ORDER BY)", sql)
 		if haveOrder {
-			// 取order by 前面的字符串
 			queryExpr, _ := gregex.MatchString("((?i)SELECT)(.+)((?i)ORDER BY)", sql)
 			if len(queryExpr) != 4 ||
 				strings.EqualFold(queryExpr[1], "SELECT") == false ||
@@ -114,8 +117,6 @@ func (d *DriverMssql) parseSql(sql string) string {
 				break
 			}
 			selectStr = queryExpr[2]
-
-			// 取order by表达式的值
 			orderExpr, _ := gregex.MatchString("((?i)ORDER BY)(.+)((?i)LIMIT)", sql)
 			if len(orderExpr) != 4 ||
 				strings.EqualFold(orderExpr[1], "ORDER BY") == false ||
@@ -132,8 +133,6 @@ func (d *DriverMssql) parseSql(sql string) string {
 			}
 			selectStr = queryExpr[2]
 		}
-
-		// 取limit后面的取值范围
 		first, limit := 0, 0
 		for i := 1; i < len(res[index]); i++ {
 			if len(strings.TrimSpace(res[index][i])) == 0 {
@@ -147,23 +146,20 @@ func (d *DriverMssql) parseSql(sql string) string {
 				break
 			}
 		}
-
 		if haveOrder {
 			sql = fmt.Sprintf(
 				"SELECT * FROM "+
 					"(SELECT ROW_NUMBER() OVER (ORDER BY %s) as ROWNUMBER_, %s ) as TMP_ "+
 					"WHERE TMP_.ROWNUMBER_ > %d AND TMP_.ROWNUMBER_ <= %d",
-				orderStr, selectStr, first, limit,
+				orderStr, selectStr, first, first+limit,
 			)
 		} else {
 			if first == 0 {
 				first = limit
-			} else {
-				first = limit - first
 			}
 			sql = fmt.Sprintf(
 				"SELECT * FROM (SELECT TOP %d * FROM (SELECT TOP %d %s) as TMP1_ ) as TMP2_ ",
-				first, limit, selectStr,
+				limit, first+limit, selectStr,
 			)
 		}
 	default:
@@ -194,43 +190,75 @@ func (d *DriverMssql) Tables(schema ...string) (tables []string, err error) {
 
 // TableFields retrieves and returns the fields information of specified table of current schema.
 func (d *DriverMssql) TableFields(table string, schema ...string) (fields map[string]*TableField, err error) {
-	table = gstr.Trim(table)
+	charL, charR := d.GetChars()
+	table = gstr.Trim(table, charL+charR)
 	if gstr.Contains(table, " ") {
-		panic("function TableFields supports only single table operations")
+		return nil, errors.New("function TableFields supports only single table operations")
 	}
 	checkSchema := d.DB.GetSchema()
 	if len(schema) > 0 && schema[0] != "" {
 		checkSchema = schema[0]
 	}
-	v := d.DB.GetCache().GetOrSetFunc(
-		fmt.Sprintf(`mssql_table_fields_%s_%s`, table, checkSchema), func() interface{} {
-			var result Result
-			var link *sql.DB
+	v, _ := gcache.GetOrSetFunc(
+		fmt.Sprintf(`mssql_table_fields_%s_%s`, table, checkSchema),
+		func() (interface{}, error) {
+			var (
+				result Result
+				link   *sql.DB
+			)
 			link, err = d.DB.GetSlave(checkSchema)
 			if err != nil {
-				return nil
+				return nil, err
 			}
-			result, err = d.DB.DoGetAll(link, fmt.Sprintf(`
-			SELECT c.name as FIELD, CASE t.name 
-				WHEN 'numeric' THEN t.name + '(' + convert(varchar(20),c.xprec) + ',' + convert(varchar(20),c.xscale) + ')' 
-				WHEN 'char' THEN t.name + '(' + convert(varchar(20),c.length)+ ')'
-				WHEN 'varchar' THEN t.name + '(' + convert(varchar(20),c.length)+ ')'
-				ELSE t.name + '(' + convert(varchar(20),c.length)+ ')' END as TYPE
-			FROM systypes t,syscolumns c WHERE t.xtype=c.xtype 
-			AND c.id = (SELECT id FROM sysobjects WHERE name='%s') 
-			ORDER BY c.colid`, strings.ToUpper(table)))
+			structureSql := fmt.Sprintf(`
+SELECT 
+	a.name Field,
+	CASE b.name 
+		WHEN 'datetime' THEN 'datetime'
+		WHEN 'numeric' THEN b.name + '(' + convert(varchar(20), a.xprec) + ',' + convert(varchar(20), a.xscale) + ')' 
+		WHEN 'char' THEN b.name + '(' + convert(varchar(20), a.length)+ ')'
+		WHEN 'varchar' THEN b.name + '(' + convert(varchar(20), a.length)+ ')'
+		ELSE b.name + '(' + convert(varchar(20),a.length)+ ')' END AS Type,
+	CASE WHEN a.isnullable=1 THEN 'YES' ELSE 'NO' end AS [Null],
+	CASE WHEN exists (
+		SELECT 1 FROM sysobjects WHERE xtype='PK' AND name IN (
+			SELECT name FROM sysindexes WHERE indid IN (
+				SELECT indid FROM sysindexkeys WHERE id = a.id AND colid=a.colid
+			)
+		)
+	) THEN 'PRI' ELSE '' END AS [Key],
+	CASE WHEN COLUMNPROPERTY(a.id,a.name,'IsIdentity')=1 THEN 'auto_increment' ELSE '' END Extra,
+	isnull(e.text,'') AS [Default],
+	isnull(g.[value],'') AS [Comment]
+FROM syscolumns a
+LEFT JOIN systypes b ON a.xtype=b.xtype AND a.xusertype=b.xusertype
+INNER JOIN sysobjects d ON a.id=d.id AND d.xtype='U' AND d.name<>'dtproperties'
+LEFT JOIN syscomments e ON a.cdefault=e.id
+LEFT JOIN sys.extended_properties g ON a.id=g.major_id AND a.colid=g.minor_id
+LEFT JOIN sys.extended_properties f ON d.id=f.major_id AND f.minor_id =0
+WHERE d.name='%s'
+ORDER BY a.id,a.colorder`,
+				strings.ToUpper(table),
+			)
+			structureSql, _ = gregex.ReplaceString(`[\n\r\s]+`, " ", gstr.Trim(structureSql))
+			result, err = d.DB.DoGetAll(link, structureSql)
 			if err != nil {
-				return nil
+				return nil, err
 			}
 			fields = make(map[string]*TableField)
 			for i, m := range result {
-				fields[strings.ToLower(m["FIELD"].String())] = &TableField{
-					Index: i,
-					Name:  strings.ToLower(m["FIELD"].String()),
-					Type:  strings.ToLower(m["TYPE"].String()),
+				fields[strings.ToLower(m["Field"].String())] = &TableField{
+					Index:   i,
+					Name:    strings.ToLower(m["Field"].String()),
+					Type:    strings.ToLower(m["Type"].String()),
+					Null:    m["Null"].Bool(),
+					Key:     m["Key"].String(),
+					Default: m["Default"].Val(),
+					Extra:   m["Extra"].String(),
+					Comment: m["Comment"].String(),
 				}
 			}
-			return fields
+			return fields, nil
 		}, 0)
 	if err == nil {
 		fields = v.(map[string]*TableField)

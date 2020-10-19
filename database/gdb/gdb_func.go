@@ -8,12 +8,13 @@ package gdb
 
 import (
 	"bytes"
-	"database/sql"
 	"errors"
 	"fmt"
 	"github.com/gogf/gf/internal/empty"
+	"github.com/gogf/gf/internal/json"
 	"github.com/gogf/gf/internal/utils"
 	"github.com/gogf/gf/os/gtime"
+	"github.com/gogf/gf/util/gutil"
 	"reflect"
 	"regexp"
 	"strings"
@@ -41,6 +42,11 @@ type apiInterfaces interface {
 	Interfaces() []interface{}
 }
 
+// apiMapStrAny is the interface support for converting struct parameter to map.
+type apiMapStrAny interface {
+	MapStrAny() map[string]interface{}
+}
+
 const (
 	ORM_TAG_FOR_STRUCT  = "orm"
 	ORM_TAG_FOR_UNIQUE  = "unique"
@@ -50,7 +56,33 @@ const (
 var (
 	// quoteWordReg is the regular expression object for a word check.
 	quoteWordReg = regexp.MustCompile(`^[a-zA-Z0-9\-_]+$`)
+
+	// Priority tags for struct converting for orm field mapping.
+	structTagPriority = append([]string{ORM_TAG_FOR_STRUCT}, gconv.StructTagPriority...)
 )
+
+// ListItemValues retrieves and returns the elements of all item struct/map with key <key>.
+// Note that the parameter <list> should be type of slice which contains elements of map or struct,
+// or else it returns an empty slice.
+//
+// The parameter <list> supports types like:
+// []map[string]interface{}
+// []map[string]sub-map
+// []struct
+// []struct:sub-struct
+// Note that the sub-map/sub-struct makes sense only if the optional parameter <subKey> is given.
+// See gutil.ListItemValues.
+func ListItemValues(list interface{}, key interface{}, subKey ...interface{}) (values []interface{}) {
+	return gutil.ListItemValues(list, key, subKey...)
+}
+
+// ListItemValuesUnique retrieves and returns the unique elements of all struct/map with key <key>.
+// Note that the parameter <list> should be type of slice which contains elements of map or struct,
+// or else it returns an empty slice.
+// See gutil.ListItemValuesUnique.
+func ListItemValuesUnique(list interface{}, key string, subKey ...interface{}) []interface{} {
+	return gutil.ListItemValuesUnique(list, key, subKey...)
+}
 
 // GetInsertOperationByOption returns proper insert option with given parameter <option>.
 func GetInsertOperationByOption(option int) string {
@@ -66,54 +98,168 @@ func GetInsertOperationByOption(option int) string {
 	return operator
 }
 
-// DataToMapDeep converts struct object to map type recursively.
-func DataToMapDeep(obj interface{}) map[string]interface{} {
-	data := gconv.Map(obj, ORM_TAG_FOR_STRUCT)
-	for key, value := range data {
-		rv := reflect.ValueOf(value)
-		kind := rv.Kind()
-		if kind == reflect.Ptr {
-			rv = rv.Elem()
-			kind = rv.Kind()
+// ConvertDataForTableRecord is a very important function, which does converting for any data that
+// will be inserted into table as a record.
+//
+// The parameter <obj> should be type of *map/map/*struct/struct.
+// It supports inherit struct definition for struct.
+func ConvertDataForTableRecord(value interface{}) map[string]interface{} {
+	var (
+		rvValue reflect.Value
+		rvKind  reflect.Kind
+		data    = DataToMapDeep(value)
+	)
+	for k, v := range data {
+		rvValue = reflect.ValueOf(v)
+		rvKind = rvValue.Kind()
+		for rvKind == reflect.Ptr {
+			rvValue = rvValue.Elem()
+			rvKind = rvValue.Kind()
 		}
-		switch kind {
+		switch rvKind {
+		case reflect.Slice, reflect.Array, reflect.Map:
+			// It should ignore the bytes type.
+			if _, ok := v.([]byte); !ok {
+				// Convert the value to JSON.
+				data[k], _ = json.Marshal(v)
+			}
 		case reflect.Struct:
-			// The underlying driver supports time.Time/*time.Time types.
-			if _, ok := value.(time.Time); ok {
+			switch v.(type) {
+			case time.Time, *time.Time, gtime.Time, *gtime.Time:
 				continue
-			}
-			if _, ok := value.(*time.Time); ok {
-				continue
-			}
-			// Use string conversion in default.
-			if s, ok := value.(apiString); ok {
-				data[key] = s.String()
-				continue
-			}
-			delete(data, key)
-			for k, v := range DataToMapDeep(value) {
-				data[k] = v
+			default:
+				// Use string conversion in default.
+				if s, ok := v.(apiString); ok {
+					data[k] = s.String()
+				} else {
+					// Convert the value to JSON.
+					data[k], _ = json.Marshal(v)
+				}
 			}
 		}
 	}
 	return data
 }
 
-// QuotePrefixTableName adds prefix string and quote chars for the table. It handles table string like:
-// "user", "user u", "user,user_detail", "user u, user_detail ut", "user as u, user_detail as ut", "user.user u".
+// DataToMapDeep converts <value> to map type recursively.
+// The parameter <value> should be type of *map/map/*struct/struct.
+// It supports inherit struct definition for struct.
+func DataToMapDeep(value interface{}) map[string]interface{} {
+	if v, ok := value.(apiMapStrAny); ok {
+		return v.MapStrAny()
+	}
+	var (
+		rvValue reflect.Value
+		rvField reflect.Value
+		rvKind  reflect.Kind
+		rtField reflect.StructField
+	)
+	if v, ok := value.(reflect.Value); ok {
+		rvValue = v
+	} else {
+		rvValue = reflect.ValueOf(value)
+	}
+	rvKind = rvValue.Kind()
+	if rvKind == reflect.Ptr {
+		rvValue = rvValue.Elem()
+		rvKind = rvValue.Kind()
+	}
+	// If given <value> is not a struct, it uses gconv.Map for converting.
+	if rvKind != reflect.Struct {
+		return gconv.Map(value, structTagPriority...)
+	}
+	// Struct handling.
+	var (
+		fieldTag reflect.StructTag
+		rvType   = rvValue.Type()
+		name     = ""
+		data     = make(map[string]interface{})
+	)
+	for i := 0; i < rvValue.NumField(); i++ {
+		rtField = rvType.Field(i)
+		rvField = rvValue.Field(i)
+		fieldName := rtField.Name
+		if !utils.IsLetterUpper(fieldName[0]) {
+			continue
+		}
+		// Struct attribute inherit
+		if rtField.Anonymous {
+			for k, v := range DataToMapDeep(rvField) {
+				data[k] = v
+			}
+			continue
+		}
+		// Other attributes.
+		name = ""
+		fieldTag = rtField.Tag
+		for _, tag := range structTagPriority {
+			if s := fieldTag.Get(tag); s != "" {
+				name = s
+				break
+			}
+		}
+		if name == "" {
+			name = fieldName
+		} else {
+			// The "orm" tag supports json tag feature: -, omitempty
+			// The "orm" tag would be like: "id,priority", so it should use splitting handling.
+			name = gstr.Trim(name)
+			if name == "-" {
+				continue
+			}
+			array := gstr.SplitAndTrim(name, ",")
+			if len(array) > 1 {
+				switch array[1] {
+				case "omitempty":
+					if empty.IsEmpty(rvField.Interface()) {
+						continue
+					} else {
+						name = array[0]
+					}
+				default:
+					name = array[0]
+				}
+			}
+		}
+
+		// The underlying driver supports time.Time/*time.Time types.
+		fieldValue := rvField.Interface()
+		switch fieldValue.(type) {
+		case time.Time, *time.Time, gtime.Time, *gtime.Time:
+			data[name] = fieldValue
+		default:
+			// Use string conversion in default.
+			if s, ok := fieldValue.(apiString); ok {
+				data[name] = s.String()
+			} else {
+				data[name] = fieldValue
+			}
+		}
+	}
+	return data
+}
+
+// doHandleTableName adds prefix string and quote chars for the table. It handles table string like:
+// "user", "user u", "user,user_detail", "user u, user_detail ut", "user as u, user_detail as ut",
+// "user.user u", "`user`.`user` u".
 //
 // Note that, this will automatically checks the table prefix whether already added, if true it does
 // nothing to the table name, or else adds the prefix to the table name.
 func doHandleTableName(table, prefix, charLeft, charRight string) string {
-	index := 0
-	array1 := gstr.SplitAndTrim(table, ",")
+	var (
+		index  = 0
+		chars  = charLeft + charRight
+		array1 = gstr.SplitAndTrim(table, ",")
+	)
 	for k1, v1 := range array1 {
 		array2 := gstr.SplitAndTrim(v1, " ")
 		// Trim the security chars.
-		array2[0] = gstr.TrimLeftStr(array2[0], charLeft)
-		array2[0] = gstr.TrimRightStr(array2[0], charRight)
+		array2[0] = gstr.Trim(array2[0], chars)
 		// Check whether it has database name.
 		array3 := gstr.Split(gstr.Trim(array2[0]), ".")
+		for k, v := range array3 {
+			array3[k] = gstr.Trim(v, chars)
+		}
 		index = len(array3) - 1
 		// If the table name already has the prefix, skips the prefix adding.
 		if len(array3[index]) <= len(prefix) || array3[index][:len(prefix)] != prefix {
@@ -137,8 +283,13 @@ func doQuoteWord(s, charLeft, charRight string) string {
 }
 
 // doQuoteString quotes string with quote chars. It handles strings like:
-// "user", "user u", "user,user_detail", "user u, user_detail ut",
-// "user.user u, user.user_detail ut", "u.id asc".
+// "user",
+// "user u",
+// "user,user_detail",
+// "user u, user_detail ut",
+// "user.user u, user.user_detail ut",
+// "u.id, u.name, u.age",
+// "u.id asc".
 func doQuoteString(s, charLeft, charRight string) string {
 	array1 := gstr.SplitAndTrim(s, ",")
 	for k1, v1 := range array1 {
@@ -191,10 +342,16 @@ func GetPrimaryKey(pointer interface{}) string {
 
 // GetPrimaryKeyCondition returns a new where condition by primary field name.
 // The optional parameter <where> is like follows:
-// 123, []int{1, 2, 3}, "john", []string{"john", "smith"}
-// g.Map{"id": g.Slice{1,2,3}}, g.Map{"id": 1, "name": "john"}, etc.
+// 123                             => primary=123
+// []int{1, 2, 3}                  => primary IN(1,2,3)
+// "john"                          => primary='john'
+// []string{"john", "smith"}       => primary IN('john','smith')
+// g.Map{"id": g.Slice{1,2,3}}     => id IN(1,2,3)
+// g.Map{"id": 1, "name": "john"}  => id=1 AND name='john'
+// etc.
 //
-// Note that it returns the given <where> parameter directly if there's the <primary> is empty.
+// Note that it returns the given <where> parameter directly if the <primary> is empty
+// or length of <where> > 1.
 func GetPrimaryKeyCondition(primary string, where ...interface{}) (newWhereCondition []interface{}) {
 	if len(where) == 0 {
 		return nil
@@ -203,14 +360,17 @@ func GetPrimaryKeyCondition(primary string, where ...interface{}) (newWhereCondi
 		return where
 	}
 	if len(where) == 1 {
-		rv := reflect.ValueOf(where[0])
-		kind := rv.Kind()
+		var (
+			rv   = reflect.ValueOf(where[0])
+			kind = rv.Kind()
+		)
 		if kind == reflect.Ptr {
 			rv = rv.Elem()
 			kind = rv.Kind()
 		}
 		switch kind {
 		case reflect.Map, reflect.Struct:
+			// Ignore the parameter <primary>.
 			break
 
 		default:
@@ -222,19 +382,25 @@ func GetPrimaryKeyCondition(primary string, where ...interface{}) (newWhereCondi
 	return where
 }
 
-// formatQuery formats the query string and its arguments before executing.
+// formatSql formats the sql string and its arguments before executing.
 // The internal handleArguments function might be called twice during the SQL procedure,
 // but do not worry about it, it's safe and efficient.
-func formatQuery(query string, args []interface{}) (newQuery string, newArgs []interface{}) {
-	return handleArguments(query, args)
+func formatSql(sql string, args []interface{}) (newSql string, newArgs []interface{}) {
+	// DO NOT do this as there may be multiple lines and comments in the sql.
+	// sql = gstr.Trim(sql)
+	// sql = gstr.Replace(sql, "\n", " ")
+	// sql, _ = gregex.ReplaceString(`\s{2,}`, ` `, sql)
+	return handleArguments(sql, args)
 }
 
 // formatWhere formats where statement and its arguments.
 // TODO []interface{} type support for parameter <where> does not completed yet.
 func formatWhere(db DB, where interface{}, args []interface{}, omitEmpty bool) (newWhere string, newArgs []interface{}) {
-	buffer := bytes.NewBuffer(nil)
-	rv := reflect.ValueOf(where)
-	kind := rv.Kind()
+	var (
+		buffer = bytes.NewBuffer(nil)
+		rv     = reflect.ValueOf(where)
+		kind   = rv.Kind()
+	)
 	if kind == reflect.Ptr {
 		rv = rv.Elem()
 		kind = rv.Kind()
@@ -245,7 +411,7 @@ func formatWhere(db DB, where interface{}, args []interface{}, omitEmpty bool) (
 
 	case reflect.Map:
 		for key, value := range DataToMapDeep(where) {
-			if omitEmpty && empty.IsEmpty(value) {
+			if gregex.IsMatchString(regularFieldNameRegPattern, key) && omitEmpty && empty.IsEmpty(value) {
 				continue
 			}
 			newArgs = formatWhereKeyValue(db, buffer, newArgs, key, value)
@@ -258,10 +424,11 @@ func formatWhere(db DB, where interface{}, args []interface{}, omitEmpty bool) (
 		// which implement apiIterator interface and are index-friendly for where conditions.
 		if iterator, ok := where.(apiIterator); ok {
 			iterator.Iterator(func(key, value interface{}) bool {
-				if omitEmpty && empty.IsEmpty(value) {
+				ketStr := gconv.String(key)
+				if gregex.IsMatchString(regularFieldNameRegPattern, ketStr) && omitEmpty && empty.IsEmpty(value) {
 					return true
 				}
-				newArgs = formatWhereKeyValue(db, buffer, newArgs, gconv.String(key), value)
+				newArgs = formatWhereKeyValue(db, buffer, newArgs, ketStr, value)
 				return true
 			})
 			break
@@ -284,10 +451,10 @@ func formatWhere(db DB, where interface{}, args []interface{}, omitEmpty bool) (
 	newWhere = buffer.String()
 	if len(newArgs) > 0 {
 		if gstr.Pos(newWhere, "?") == -1 {
-			if lastOperatorReg.MatchString(newWhere) {
+			if gregex.IsMatchString(lastOperatorRegPattern, newWhere) {
 				// Eg: Where/And/Or("uid>=", 1)
 				newWhere += "?"
-			} else if gregex.IsMatchString(`^[\w\.\-]+$`, newWhere) {
+			} else if gregex.IsMatchString(regularFieldNameRegPattern, newWhere) {
 				newWhere = db.QuoteString(newWhere)
 				if len(newArgs) > 0 {
 					if utils.IsArray(newArgs[0]) {
@@ -309,7 +476,7 @@ func formatWhere(db DB, where interface{}, args []interface{}, omitEmpty bool) (
 }
 
 // formatWhereInterfaces formats <where> as []interface{}.
-// TODO []interface{} type support for parameter <where> does not completed yet.
+// TODO supporting for parameter <where> with []interface{} type is not completed yet.
 func formatWhereInterfaces(db DB, where []interface{}, buffer *bytes.Buffer, newArgs []interface{}) []interface{} {
 	var str string
 	var array []interface{}
@@ -337,8 +504,10 @@ func formatWhereKeyValue(db DB, buffer *bytes.Buffer, newArgs []interface{}, key
 	// If the value is type of slice, and there's only one '?' holder in
 	// the key string, it automatically adds '?' holder chars according to its arguments count
 	// and converts it to "IN" statement.
-	rv := reflect.ValueOf(value)
-	kind := rv.Kind()
+	var (
+		rv   = reflect.ValueOf(value)
+		kind = rv.Kind()
+	)
 	switch kind {
 	case reflect.Slice, reflect.Array:
 		count := gstr.Count(quotedKey, "?")
@@ -354,7 +523,7 @@ func formatWhereKeyValue(db DB, buffer *bytes.Buffer, newArgs []interface{}, key
 		}
 	default:
 		if value == nil || empty.IsNil(rv) {
-			if gregex.IsMatchString(`^[\w\.\-]+$`, key) {
+			if gregex.IsMatchString(regularFieldNameRegPattern, key) {
 				// The key is a single field name.
 				buffer.WriteString(quotedKey + " IS NULL")
 			} else {
@@ -367,11 +536,24 @@ func formatWhereKeyValue(db DB, buffer *bytes.Buffer, newArgs []interface{}, key
 			if gstr.Pos(quotedKey, "?") == -1 {
 				like := " like"
 				if len(quotedKey) > len(like) && gstr.Equal(quotedKey[len(quotedKey)-len(like):], like) {
+					// Eg: Where(g.Map{"name like": "john%"})
 					buffer.WriteString(quotedKey + " ?")
-				} else if lastOperatorReg.MatchString(quotedKey) {
+				} else if gregex.IsMatchString(lastOperatorRegPattern, quotedKey) {
+					// Eg: Where(g.Map{"age > ": 16})
 					buffer.WriteString(quotedKey + " ?")
-				} else {
+				} else if gregex.IsMatchString(regularFieldNameRegPattern, key) {
+					// The key is a regular field name.
 					buffer.WriteString(quotedKey + "=?")
+				} else {
+					// The key is not a regular field name.
+					// Eg: Where(g.Map{"age > 16": nil})
+					// Issue: https://github.com/gogf/gf/issues/765
+					if empty.IsEmpty(value) {
+						buffer.WriteString(quotedKey)
+						break
+					} else {
+						buffer.WriteString(quotedKey + "=?")
+					}
 				}
 			} else {
 				buffer.WriteString(quotedKey)
@@ -384,13 +566,17 @@ func formatWhereKeyValue(db DB, buffer *bytes.Buffer, newArgs []interface{}, key
 
 // handleArguments is a nice function which handles the query and its arguments before committing to
 // underlying driver.
-func handleArguments(query string, args []interface{}) (newQuery string, newArgs []interface{}) {
-	newQuery = query
+func handleArguments(sql string, args []interface{}) (newSql string, newArgs []interface{}) {
+	newSql = sql
+	// insertHolderCount is used to calculate the inserting position for the '?' holder.
+	insertHolderCount := 0
 	// Handles the slice arguments.
 	if len(args) > 0 {
 		for index, arg := range args {
-			rv := reflect.ValueOf(arg)
-			kind := rv.Kind()
+			var (
+				rv   = reflect.ValueOf(arg)
+				kind = rv.Kind()
+			)
 			if kind == reflect.Ptr {
 				rv = rv.Elem()
 				kind = rv.Kind()
@@ -403,20 +589,45 @@ func handleArguments(query string, args []interface{}) (newQuery string, newArgs
 					newArgs = append(newArgs, arg)
 					continue
 				}
-				for i := 0; i < rv.Len(); i++ {
-					newArgs = append(newArgs, rv.Index(i).Interface())
+
+				if rv.Len() == 0 {
+					// Empty slice argument, it converts the sql to a false sql.
+					// Eg:
+					// Query("select * from xxx where id in(?)", g.Slice{}) -> select * from xxx where 0=1
+					// Where("id in(?)", g.Slice{}) -> WHERE 0=1
+					if gstr.Contains(newSql, "?") {
+						whereKeyWord := " WHERE "
+						if p := gstr.PosI(newSql, whereKeyWord); p == -1 {
+							return "0=1", []interface{}{}
+						} else {
+							return gstr.SubStr(newSql, 0, p+len(whereKeyWord)) + "0=1", []interface{}{}
+						}
+					}
+				} else {
+					for i := 0; i < rv.Len(); i++ {
+						newArgs = append(newArgs, rv.Index(i).Interface())
+					}
 				}
-				// It the '?' holder count equals the length of the slice,
+
+				// If the '?' holder count equals the length of the slice,
 				// it does not implement the arguments splitting logic.
 				// Eg: db.Query("SELECT ?+?", g.Slice{1, 2})
-				if len(args) == 1 && gstr.Count(newQuery, "?") == rv.Len() {
+				if len(args) == 1 && gstr.Count(newSql, "?") == rv.Len() {
 					break
 				}
 				// counter is used to finding the inserting position for the '?' holder.
-				counter := 0
-				newQuery, _ = gregex.ReplaceStringFunc(`\?`, newQuery, func(s string) string {
+				var (
+					counter  = 0
+					replaced = false
+				)
+				newSql, _ = gregex.ReplaceStringFunc(`\?`, newSql, func(s string) string {
+					if replaced {
+						return s
+					}
 					counter++
-					if counter == index+1 {
+					if counter == index+insertHolderCount+1 {
+						replaced = true
+						insertHolderCount += rv.Len() - 1
 						return "?" + strings.Repeat(",?", rv.Len()-1)
 					}
 					return s
@@ -433,11 +644,23 @@ func handleArguments(query string, args []interface{}) (newQuery string, newArgs
 					newArgs = append(newArgs, arg)
 					continue
 				}
-				// It converts the struct to string in default
-				// if it implements the String interface.
-				if v, ok := arg.(apiString); ok {
+				switch v := arg.(type) {
+				case time.Time, *time.Time:
+					newArgs = append(newArgs, arg)
+					continue
+
+				// Special handling for gtime.Time.
+				case gtime.Time:
 					newArgs = append(newArgs, v.String())
 					continue
+
+				default:
+					// It converts the struct to string in default
+					// if it implements the String interface.
+					if v, ok := arg.(apiString); ok {
+						newArgs = append(newArgs, v.String())
+						continue
+					}
 				}
 				newArgs = append(newArgs, arg)
 
@@ -450,26 +673,28 @@ func handleArguments(query string, args []interface{}) (newQuery string, newArgs
 }
 
 // formatError customizes and returns the SQL error.
-func formatError(err error, query string, args ...interface{}) error {
-	if err != nil && err != sql.ErrNoRows {
-		return errors.New(fmt.Sprintf("%s, %s\n", err.Error(), bindArgsToQuery(query, args)))
+func formatError(err error, sql string, args ...interface{}) error {
+	if err != nil && err != ErrNoRows {
+		return errors.New(fmt.Sprintf("%s, %s\n", err.Error(), FormatSqlWithArgs(sql, args)))
 	}
 	return err
 }
 
-// bindArgsToQuery binds the arguments to the query string and returns a complete
+// FormatSqlWithArgs binds the arguments to the sql string and returns a complete
 // sql string, just for debugging.
-func bindArgsToQuery(query string, args []interface{}) string {
+func FormatSqlWithArgs(sql string, args []interface{}) string {
 	index := -1
 	newQuery, _ := gregex.ReplaceStringFunc(
-		`(\?|:\d+|\$\d+|@p\d+)`, query, func(s string) string {
+		`(\?|:v\d+|\$\d+|@p\d+)`, sql, func(s string) string {
 			index++
 			if len(args) > index {
 				if args[index] == nil {
 					return "null"
 				}
-				rv := reflect.ValueOf(args[index])
-				kind := rv.Kind()
+				var (
+					rv   = reflect.ValueOf(args[index])
+					kind = rv.Kind()
+				)
 				if kind == reflect.Ptr {
 					if rv.IsNil() || !rv.IsValid() {
 						return "null"

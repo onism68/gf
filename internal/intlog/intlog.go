@@ -4,7 +4,7 @@
 // If a copy of the MIT was not distributed with this file,
 // You can obtain one at https://github.com/gogf/gf.
 
-// Package intlog provides internal logging for GF development usage only.
+// Package intlog provides internal logging for GoFrame development usage only.
 package intlog
 
 import (
@@ -25,14 +25,24 @@ var (
 )
 
 func init() {
+	// Debugging configured.
 	if !cmdenv.Get("GF_DEBUG").IsEmpty() {
 		isGFDebug = true
 		return
 	}
 }
 
-// IsGFDebug checks and returns whether current process is in GF development.
-func IsGFDebug() bool {
+// SetEnabled enables/disables the internal logging manually.
+// Note that this function is not concurrent safe, be aware of the DATA RACE.
+func SetEnabled(enabled bool) {
+	// If they're the same, it does not write the <isGFDebug> but only reading operation.
+	if isGFDebug != enabled {
+		isGFDebug = enabled
+	}
+}
+
+// IsEnabled checks and returns whether current process is in GF development.
+func IsEnabled() bool {
 	return isGFDebug
 }
 

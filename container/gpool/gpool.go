@@ -82,7 +82,9 @@ func (p *Pool) Put(value interface{}) error {
 	if p.TTL == 0 {
 		item.expire = 0
 	} else {
-		item.expire = gtime.TimestampMilli() + p.TTL.Milliseconds()
+		// As for Golang version < 1.13, there's no method Milliseconds for time.Duration.
+		// So we need calculate the milliseconds using its nanoseconds value.
+		item.expire = gtime.TimestampMilli() + p.TTL.Nanoseconds()/1000000
 	}
 	p.list.PushBack(item)
 	return nil
@@ -168,6 +170,7 @@ func (p *Pool) checkExpireItems() {
 		if r := p.list.PopFront(); r != nil {
 			item := r.(*poolItem)
 			latestExpire = item.expire
+			// TODO improve the auto-expiration mechanism of the pool.
 			if item.expire > timestampMilli {
 				p.list.PushFront(item)
 				break

@@ -17,11 +17,34 @@ type Time struct {
 	TimeWrapper
 }
 
-// New creates and returns a Time object with given time.Time object.
-// The parameter <t> is optional.
-func New(t ...time.Time) *Time {
-	if len(t) > 0 {
-		return NewFromTime(t[0])
+// apiUnixNano is an interface definition commonly for custom time.Time wrapper.
+type apiUnixNano interface {
+	UnixNano() int64
+}
+
+// New creates and returns a Time object with given parameter.
+// The optional parameter can be type of: time.Time/*time.Time, string or integer.
+func New(param ...interface{}) *Time {
+	if len(param) > 0 {
+		switch r := param[0].(type) {
+		case time.Time:
+			r.Nanosecond()
+			return NewFromTime(r)
+		case *time.Time:
+			return NewFromTime(*r)
+		case string:
+			return NewFromStr(r)
+		case []byte:
+			return NewFromStr(string(r))
+		case int:
+			return NewFromTimeStamp(int64(r))
+		case int64:
+			return NewFromTimeStamp(r)
+		default:
+			if v, ok := r.(apiUnixNano); ok {
+				return NewFromTimeStamp(v.UnixNano())
+			}
+		}
 	}
 	return &Time{
 		TimeWrapper{time.Time{}},
@@ -43,6 +66,7 @@ func NewFromTime(t time.Time) *Time {
 }
 
 // NewFromStr creates and returns a Time object with given string.
+// Note that it returns nil if there's error occurs.
 func NewFromStr(str string) *Time {
 	if t, err := StrToTime(str); err == nil {
 		return t
@@ -52,6 +76,7 @@ func NewFromStr(str string) *Time {
 
 // NewFromStrFormat creates and returns a Time object with given string and
 // custom format like: Y-m-d H:i:s.
+// Note that it returns nil if there's error occurs.
 func NewFromStrFormat(str string, format string) *Time {
 	if t, err := StrToTimeFormat(str, format); err == nil {
 		return t
@@ -61,6 +86,7 @@ func NewFromStrFormat(str string, format string) *Time {
 
 // NewFromStrLayout creates and returns a Time object with given string and
 // stdlib layout like: 2006-01-02 15:04:05.
+// Note that it returns nil if there's error occurs.
 func NewFromStrLayout(str string, layout string) *Time {
 	if t, err := StrToTimeLayout(str, layout); err == nil {
 		return t
@@ -70,6 +96,7 @@ func NewFromStrLayout(str string, layout string) *Time {
 
 // NewFromTimeStamp creates and returns a Time object with given timestamp,
 // which can be in seconds to nanoseconds.
+// Eg: 1600443866 and 1600443866199266000 are both considered as valid timestamp number.
 func NewFromTimeStamp(timestamp int64) *Time {
 	if timestamp == 0 {
 		return &Time{}
@@ -175,31 +202,31 @@ func (t *Time) Clone() *Time {
 
 // Add adds the duration to current time.
 func (t *Time) Add(d time.Duration) *Time {
-	t.Time = t.Time.Add(d)
-	return t
+	newTime := t.Clone()
+	newTime.Time = newTime.Time.Add(d)
+	return newTime
 }
 
 // AddStr parses the given duration as string and adds it to current time.
-func (t *Time) AddStr(duration string) error {
+func (t *Time) AddStr(duration string) (*Time, error) {
 	if d, err := time.ParseDuration(duration); err != nil {
-		return err
+		return nil, err
 	} else {
-		t.Time = t.Time.Add(d)
+		return t.Add(d), nil
 	}
-	return nil
 }
 
 // ToLocation converts current time to specified location.
 func (t *Time) ToLocation(location *time.Location) *Time {
-	t.Time = t.Time.In(location)
-	return t
+	newTime := t.Clone()
+	newTime.Time = newTime.Time.In(location)
+	return newTime
 }
 
 // ToZone converts current time to specified zone like: Asia/Shanghai.
 func (t *Time) ToZone(zone string) (*Time, error) {
 	if l, err := time.LoadLocation(zone); err == nil {
-		t.Time = t.Time.In(l)
-		return t, nil
+		return t.ToLocation(l), nil
 	} else {
 		return nil, err
 	}
@@ -207,8 +234,9 @@ func (t *Time) ToZone(zone string) (*Time, error) {
 
 // UTC converts current time to UTC timezone.
 func (t *Time) UTC() *Time {
-	t.Time = t.Time.UTC()
-	return t
+	newTime := t.Clone()
+	newTime.Time = newTime.Time.UTC()
+	return newTime
 }
 
 // ISO8601 formats the time as ISO8601 and returns it as string.
@@ -223,14 +251,16 @@ func (t *Time) RFC822() string {
 
 // Local converts the time to local timezone.
 func (t *Time) Local() *Time {
-	t.Time = t.Time.Local()
-	return t
+	newTime := t.Clone()
+	newTime.Time = newTime.Time.Local()
+	return newTime
 }
 
 // AddDate adds year, month and day to the time.
 func (t *Time) AddDate(years int, months int, days int) *Time {
-	t.Time = t.Time.AddDate(years, months, days)
-	return t
+	newTime := t.Clone()
+	newTime.Time = newTime.Time.AddDate(years, months, days)
+	return newTime
 }
 
 // Round returns the result of rounding t to the nearest multiple of d (since the zero time).
@@ -242,8 +272,9 @@ func (t *Time) AddDate(years int, months int, days int) *Time {
 // time. Thus, Round(Hour) may return a time with a non-zero
 // minute, depending on the time's Location.
 func (t *Time) Round(d time.Duration) *Time {
-	t.Time = t.Time.Round(d)
-	return t
+	newTime := t.Clone()
+	newTime.Time = newTime.Time.Round(d)
+	return newTime
 }
 
 // Truncate returns the result of rounding t down to a multiple of d (since the zero time).
@@ -254,8 +285,9 @@ func (t *Time) Round(d time.Duration) *Time {
 // time. Thus, Truncate(Hour) may return a time with a non-zero
 // minute, depending on the time's Location.
 func (t *Time) Truncate(d time.Duration) *Time {
-	t.Time = t.Time.Truncate(d)
-	return t
+	newTime := t.Clone()
+	newTime.Time = newTime.Time.Truncate(d)
+	return newTime
 }
 
 // Equal reports whether t and u represent the same time instant.

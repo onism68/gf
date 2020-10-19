@@ -67,6 +67,10 @@ func (s *Server) parsePattern(pattern string) (domain, method, path string, err 
 // is the well designed router storage structure for router searching when the request is under serving.
 func (s *Server) setHandler(pattern string, handler *handlerItem) {
 	handler.itemId = handlerIdGenerator.Add(1)
+	if handler.source == "" {
+		_, file, line := gdebug.CallerWithFilter(gFILTER_KEY)
+		handler.source = fmt.Sprintf(`%s:%d`, file, line)
+	}
 	domain, method, uri, err := s.parsePattern(pattern)
 	if err != nil {
 		s.Logger().Fatal("invalid pattern:", pattern, err)
@@ -83,7 +87,10 @@ func (s *Server) setHandler(pattern string, handler *handlerItem) {
 		switch handler.itemType {
 		case gHANDLER_TYPE_HANDLER, gHANDLER_TYPE_OBJECT, gHANDLER_TYPE_CONTROLLER:
 			if item, ok := s.routesMap[routerKey]; ok {
-				s.Logger().Fatalf(`duplicated route registry "%s", already registered at %s`, pattern, item[0].file)
+				s.Logger().Fatalf(
+					`duplicated route registry "%s" at %s , already registered at %s`,
+					pattern, handler.source, item[0].source,
+				)
 				return
 			}
 		}
@@ -184,9 +191,9 @@ func (s *Server) setHandler(pattern string, handler *handlerItem) {
 	if _, ok := s.routesMap[routerKey]; !ok {
 		s.routesMap[routerKey] = make([]registeredRouteItem, 0)
 	}
-	_, file, line := gdebug.CallerWithFilter(gFILTER_KEY)
+
 	routeItem := registeredRouteItem{
-		file:    fmt.Sprintf(`%s:%d`, file, line),
+		source:  handler.source,
 		handler: handler,
 	}
 	switch handler.itemType {
@@ -223,12 +230,40 @@ func (s *Server) compareRouterPriority(newItem *handlerItem, oldItem *handlerIte
 	if newItem.router.Priority < oldItem.router.Priority {
 		return false
 	}
-	// Route type: {xxx} > :xxx > *xxx.
-	// Eg: /name/act > /{name}/:act
-	var fuzzyCountFieldNew, fuzzyCountFieldOld int
-	var fuzzyCountNameNew, fuzzyCountNameOld int
-	var fuzzyCountAnyNew, fuzzyCountAnyOld int
-	var fuzzyCountTotalNew, fuzzyCountTotalOld int
+
+	// Compare the length of their URI,
+	// but the fuzzy and named parts of the URI are not calculated to the result.
+
+	// Eg:
+	// /admin-goods-{page} > /admin-{page}
+	// /{hash}.{type}      > /{hash}
+	var uriNew, uriOld string
+	uriNew, _ = gregex.ReplaceString(`\{[^/]+?\}`, "", newItem.router.Uri)
+	uriOld, _ = gregex.ReplaceString(`\{[^/]+?\}`, "", oldItem.router.Uri)
+	uriNew, _ = gregex.ReplaceString(`:[^/]+?`, "", uriNew)
+	uriOld, _ = gregex.ReplaceString(`:[^/]+?`, "", uriOld)
+	uriNew, _ = gregex.ReplaceString(`\*[^/]*`, "", uriNew) // Replace "/*" and "/*any".
+	uriOld, _ = gregex.ReplaceString(`\*[^/]*`, "", uriOld) // Replace "/*" and "/*any".
+	if len(uriNew) > len(uriOld) {
+		return true
+	}
+	if len(uriNew) < len(uriOld) {
+		return false
+	}
+
+	// Route type checks: {xxx} > :xxx > *xxx.
+	// Eg:
+	// /name/act > /{name}/:act
+	var (
+		fuzzyCountFieldNew int
+		fuzzyCountFieldOld int
+		fuzzyCountNameNew  int
+		fuzzyCountNameOld  int
+		fuzzyCountAnyNew   int
+		fuzzyCountAnyOld   int
+		fuzzyCountTotalNew int
+		fuzzyCountTotalOld int
+	)
 	for _, v := range newItem.router.Uri {
 		switch v {
 		case '{':
@@ -272,24 +307,6 @@ func (s *Server) compareRouterPriority(newItem *handlerItem, oldItem *handlerIte
 		return true
 	}
 	if fuzzyCountNameNew < fuzzyCountNameOld {
-		return false
-	}
-
-	// It then compares the length of their URI,
-	// but the fuzzy and named parts of the URI are not calculated to the result.
-
-	// Eg: /admin-goods-{page} > /admin-{page}
-	var uriNew, uriOld string
-	uriNew, _ = gregex.ReplaceString(`\{[^/]+\}`, "", newItem.router.Uri)
-	uriNew, _ = gregex.ReplaceString(`:[^/]+`, "", uriNew)
-	uriNew, _ = gregex.ReplaceString(`\*[^/]+`, "", uriNew)
-	uriOld, _ = gregex.ReplaceString(`\{[^/]+\}`, "", oldItem.router.Uri)
-	uriOld, _ = gregex.ReplaceString(`:[^/]+`, "", uriOld)
-	uriOld, _ = gregex.ReplaceString(`\*[^/]+`, "", uriOld)
-	if len(uriNew) > len(uriOld) {
-		return true
-	}
-	if len(uriNew) < len(uriOld) {
 		return false
 	}
 
